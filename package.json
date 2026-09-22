@@ -1,5 +1,5 @@
 {
-  "name": "@maik205/opencode-ssh",
+  "name": "opencode-plugin-ssh",
   "version": "0.1.0",
   "description": "Persistent interactive SSH sessions, profiles, remote SFTP editing, and background job supervision for OpenCode v2",
   "type": "module",
