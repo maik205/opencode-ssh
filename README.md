@@ -1,4 +1,4 @@
-# opencode-ssh
+# @maik205/opencode-ssh
 
 OpenCode plugin for persistent SSH connections, interactive PTY shells, SFTP file operations, and remote background job management.
 
@@ -20,7 +20,7 @@ Add to your OpenCode configuration (`opencode.json` or `~/.config/opencode/openc
 ```jsonc
 {
   "plugin": [
-    "opencode-ssh"
+    "@maik205/opencode-ssh"
   ]
 }
 ```
@@ -28,7 +28,7 @@ Add to your OpenCode configuration (`opencode.json` or `~/.config/opencode/openc
 Or install as a dependency:
 
 ```bash
-npm install -D opencode-ssh
+npm install -D @maik205/opencode-ssh
 ```
 
 ## Tools
