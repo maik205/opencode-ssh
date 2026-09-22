@@ -4,6 +4,7 @@ import type { InteractiveSessionInfo, SSHAuthProfile } from "./types.js"
 
 export class SessionManager {
   private sessions = new Map<string, SSHSession>()
+  private sessionConfigs = new Map<string, SSHSessionOptions>()
   private defaultSessionId: string | null = null
   public configManager: ConfigManager
 
@@ -22,7 +23,7 @@ export class SessionManager {
       if (existing.isOpen()) {
         return existing
       } else {
-        // Stale / closed session
+        // Stale / closed session - close cleanly
         await existing.close()
         this.sessions.delete(id)
       }
@@ -34,26 +35,52 @@ export class SessionManager {
       profile = await this.configManager.get(sessionIdOrProfileName)
     }
 
+    // Check previously stored config for auto-reconnect
+    const cachedConfig = this.sessionConfigs.get(id)
+
     const sessionOptions: SSHSessionOptions = {
-      profile,
-      host: options?.host,
-      port: options?.port,
-      username: options?.username,
-      password: options?.password,
-      privateKey: options?.privateKey,
-      privateKeyPath: options?.privateKeyPath,
-      passphrase: options?.passphrase,
+      profile: profile || cachedConfig?.profile,
+      host: options?.host || cachedConfig?.host,
+      port: options?.port || cachedConfig?.port,
+      username: options?.username || cachedConfig?.username,
+      password: options?.password || cachedConfig?.password,
+      privateKey: options?.privateKey || cachedConfig?.privateKey,
+      privateKeyPath: options?.privateKeyPath || cachedConfig?.privateKeyPath,
+      passphrase: options?.passphrase || cachedConfig?.passphrase,
     }
 
     const session = new SSHSession(id, sessionOptions)
     await session.connect(sessionOptions)
 
     this.sessions.set(id, session)
+    this.sessionConfigs.set(id, sessionOptions)
+
     if (!this.defaultSessionId) {
       this.defaultSessionId = id
     }
 
     return session
+  }
+
+  renameSession(oldId: string, newId: string): boolean {
+    const session = this.sessions.get(oldId)
+    if (!session || this.sessions.has(newId)) return false
+
+    this.sessions.delete(oldId)
+    ;(session as any).id = newId
+    this.sessions.set(newId, session)
+
+    const cfg = this.sessionConfigs.get(oldId)
+    if (cfg) {
+      this.sessionConfigs.delete(oldId)
+      this.sessionConfigs.set(newId, cfg)
+    }
+
+    if (this.defaultSessionId === oldId) {
+      this.defaultSessionId = newId
+    }
+
+    return true
   }
 
   getSession(id?: string): SSHSession | undefined {
@@ -68,6 +95,14 @@ export class SessionManager {
       return true
     }
     return false
+  }
+
+  getDefaultSessionId(): string | null {
+    return this.defaultSessionId
+  }
+
+  getAllOpenSessions(): SSHSession[] {
+    return Array.from(this.sessions.values()).filter((s) => s.isOpen())
   }
 
   listSessions(): InteractiveSessionInfo[] {
@@ -90,6 +125,7 @@ export class SessionManager {
 
     await session.close()
     this.sessions.delete(id)
+    this.sessionConfigs.delete(id)
 
     if (this.defaultSessionId === id) {
       const next = this.sessions.keys().next().value
@@ -104,6 +140,7 @@ export class SessionManager {
       await session.close()
     }
     this.sessions.clear()
+    this.sessionConfigs.clear()
     this.defaultSessionId = null
   }
 }

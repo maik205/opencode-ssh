@@ -3,6 +3,8 @@ import path from "node:path"
 import os from "node:os"
 import { Client, type ClientChannel, type ConnectConfig } from "ssh2"
 import type { ExecResult, InteractiveSessionInfo, PtyOutputChunk, SSHAuthProfile } from "./types.js"
+import { SFTPManager } from "./sftp-manager.js"
+import { JobManager } from "./job-manager.js"
 
 export interface SSHSessionOptions {
   profile?: SSHAuthProfile
@@ -30,12 +32,17 @@ export class SSHSession {
   private outputBuffer: PtyOutputChunk[] = []
   private maxBufferSize = 2000
 
+  public sftp: SFTPManager
+  public jobs: JobManager
+
   // For waiting on commands inside interactive shell
   private onDataCallbacks: Set<(chunk: PtyOutputChunk) => void> = new Set()
 
   constructor(id: string, options: SSHSessionOptions) {
     this.id = id
     this.client = new Client()
+    this.sftp = new SFTPManager(this.client)
+    this.jobs = new JobManager(this)
     this.host = options.host || options.profile?.host || "localhost"
     this.port = options.port || options.profile?.port || 22
     this.username = options.username || options.profile?.username || os.userInfo().username
@@ -60,7 +67,12 @@ export class SSHSession {
 
     const privateKey = options.privateKey || profile?.privateKey
     const privateKeyPath = options.privateKeyPath || profile?.privateKeyPath
-    const passphrase = options.passphrase || profile?.passphrase
+    // Passphrase can be supplied directly, via profile, or via environment variable
+    const passphrase =
+      options.passphrase ||
+      profile?.passphrase ||
+      process.env.SSH_PASSPHRASE ||
+      (profile?.name ? process.env[`SSH_PASSPHRASE_${profile.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`] : undefined)
 
     if (privateKey) {
       connectConfig.privateKey = privateKey
@@ -70,8 +82,14 @@ export class SSHSession {
         ? path.join(os.homedir(), privateKeyPath.slice(1))
         : privateKeyPath
       if (fs.existsSync(resolvedPath)) {
-        connectConfig.privateKey = fs.readFileSync(resolvedPath)
-        if (passphrase) connectConfig.passphrase = passphrase
+        try {
+          connectConfig.privateKey = fs.readFileSync(resolvedPath)
+          if (passphrase) connectConfig.passphrase = passphrase
+        } catch (e: any) {
+          throw new Error(`Failed to read private key at '${resolvedPath}': ${e.message}`)
+        }
+      } else {
+        throw new Error(`Private key file not found at: '${resolvedPath}'`)
       }
     } else if (!password) {
       // Try default SSH keys if no password or key is provided
@@ -148,6 +166,7 @@ export class SSHSession {
 
       this.client.exec(command, (err, stream) => {
         if (err) return reject(err)
+        if (!stream) return reject(new Error("SSH channel creation failed: empty stream."))
 
         let stdout = ""
         let stderr = ""
@@ -182,6 +201,11 @@ export class SSHSession {
             durationMs: Date.now() - startTime,
           })
         })
+
+        stream.on("error", (err: any) => {
+          if (timer) clearTimeout(timer)
+          reject(err)
+        })
       })
     })
   }
@@ -196,6 +220,17 @@ export class SSHSession {
     }
 
     return new Promise<void>((resolve, reject) => {
+      const defaultEnv: Record<string, string> = {
+        TERM: "dumb",
+        PAGER: "cat",
+        GIT_PAGER: "cat",
+        SYSTEMD_PAGER: "cat",
+        CI: "1",
+        NO_COLOR: "1",
+        LANG: "en_US.UTF-8",
+        ...(env || {}),
+      }
+
       this.client.shell(
         {
           term: "xterm-256color",
@@ -203,7 +238,7 @@ export class SSHSession {
           cols: 120,
         },
         {
-          env: env || { LANG: "en_US.UTF-8" },
+          env: defaultEnv,
         },
         (err, stream) => {
           if (err) return reject(err)
@@ -301,10 +336,15 @@ export class SSHSession {
           if (!resolved) {
             resolved = true
             cleanup()
-            // Clean ANSI escape codes and the marker command from output
+            // Clean ANSI escape codes, OSC sequences, and the marker command from output
+            const ansiRegex = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g
+            const oscRegex = /\u001b\][^\u001b\u0007]*(\u001b\\|\u0007)/g
             const cleaned = captured
               .replace(new RegExp(`echo\\s+["']?${marker}["']?`, "g"), "")
               .replace(new RegExp(marker, "g"), "")
+              .replace(oscRegex, "")
+              .replace(ansiRegex, "")
+              .replace(/\r\n/g, "\n")
               .trim()
             resolve(cleaned)
           }
@@ -333,6 +373,11 @@ export class SSHSession {
   }
 
   async close(): Promise<void> {
+    if (this.sftp) {
+      try {
+        this.sftp.close()
+      } catch {}
+    }
     if (this.shellChannel) {
       try {
         this.shellChannel.close()

@@ -1,97 +1,66 @@
 # opencode-ssh
 
-A persistent, interactive SSH session and profile manager plugin for **OpenCode v2**.
-
-## Key Features
-
-1. **Persistent Session Management**:
-   - Holds SSH connections in memory across agent tool calls.
-   - Eliminates re-authenticating on every command.
-   - Automatic reconnect if a session is interrupted.
-2. **Dual Execution Modes (Hybrid Exec + PTY)**:
-   - **`ssh_exec`**: High-performance discrete command execution channel returning stdout, stderr, and exit codes.
-   - **`ssh_interactive_cmd`**: Persistent pseudo-terminal (PTY) shell preserving working directory, environment variables, virtualenvs, and interactive state.
-   - **`ssh_pty_send`** & **`ssh_pty_read`**: Send keystrokes, answers to interactive prompts (`sudo`, `yes/no`, passwords), and read buffer chunks.
-3. **Authentication Profiles (`~/.ssh/config` + OpenCode storage)**:
-   - Automatically parses and detects existing hosts from your system `~/.ssh/config`.
-   - Allows saving custom profiles with keys, passwords, custom ports, or passphrase settings.
-   - Safe credential handling (passwords and sensitive keys are not leaked in listing tools).
-4. **Agent-Friendly Tool Design**:
-   - Clean JSON schemas, clear descriptions, and typed outputs.
-   - Supports OpenCode Code Mode (`options: { codemode: true }`).
-   - Informative progress notifications.
+A persistent, interactive SSH session, SFTP file management, and background job supervisor plugin for **OpenCode v2**.
 
 ---
 
-## Available Tools
+## What Makes This Agent-Friendly?
 
-| Tool | Description |
-|---|---|
-| `ssh_list_profiles` | Lists configured profiles from `~/.ssh/config` and saved OpenCode profiles. |
-| `ssh_save_profile` | Saves or updates an SSH connection profile. |
-| `ssh_connect` | Establishes or reuses a persistent SSH session. |
-| `ssh_list_sessions` | Lists currently active open SSH sessions and connection metadata. |
-| `ssh_exec` | Executes a single command over SSH multiplexing (fast, discrete output). |
-| `ssh_interactive_cmd` | Runs a command in the persistent interactive PTY shell. |
-| `ssh_pty_send` | Sends interactive input, answers, or control signals (`\x03` Ctrl+C) to PTY. |
-| `ssh_pty_read` | Reads recent terminal output buffer lines. |
-| `ssh_close` | Closes and cleans up a specific active SSH session. |
-
----
-
-## Installation & Setup in OpenCode v2
-
-### Option 1: Load as a Local Plugin in `opencode.jsonc`
-
-Add the directory to your project or global OpenCode configuration:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": [
-    "C:/Users/maik/Documents/Projects/oc-ssh"
-  ]
-}
-```
-
-Or copy/symlink to `.opencode/plugins/ssh`:
-
-```bash
-mkdir -p .opencode/plugins/ssh
-# copy dist and package.json or reference directly
-```
-
-### Option 2: Build from Source
-
-```bash
-npm run build
-```
+1. **Deterministic Structured JSON Responses**:
+   - Every tool returns `{ "success": true, ... }` or `{ "success": false, "error": { "code", "message", "hint" } }`.
+   - Never leaves the agent guessing why a connection or file operation failed.
+2. **Anti-Hang Protection & Environment Guard**:
+   - Shell sessions automatically inject `TERM=dumb`, `PAGER=cat`, `GIT_PAGER=cat`, `SYSTEMD_PAGER=cat`, and `CI=1`. Commands like `journalctl` or `git diff` never hang inside pagers like `less`.
+   - All async network handshakes (SFTP, stream creation) have hard timeout boundaries to prevent agent lockups.
+3. **True Remote Code Editing (SFTP)**:
+   - Eliminates fragile `sed` or `cat <<EOF` remote file mutations.
+   - `ssh_edit_file` mirrors OpenCode’s native search-and-replace `edit` tool with uniqueness enforcement and line reporting.
+4. **Multi-Session Management & Cluster Broadcast**:
+   - Run dozens of remote connections concurrently.
+   - Switch active default session seamlessly with `ssh_switch_session`.
+   - Fan out commands across all connected servers in parallel via `ssh_broadcast`.
+5. **Background Job Supervision**:
+   - Detached, supervised long-running process manager (`ssh_job_spawn`, `ssh_job_status`, `ssh_job_logs`, `ssh_job_kill`).
+   - Handles commands that outlive OpenCode tool execution timeouts (builds, migrations, containers).
+6. **Instant Diagnostics**:
+   - `ssh_system_inspect` runs a single multi-metric probe returning OS, Kernel, Arch, Uptime, Memory, Disk, listening ports, package managers, runtimes (`node`, `python`, `docker`, `go`, `git`), and git repo status in 1 round trip.
 
 ---
 
-## Agent Usage Examples
+## Tool Reference (19 Registered Tools)
 
-### Example 1: Listing Profiles and Running a Command
-```ts
-// Agent lists profiles
-await tools.ssh.ssh_list_profiles()
+### Session & Multi-Host Management
+- **`ssh_list_profiles`**: Lists hosts configured in `~/.ssh/config` or custom OpenCode profiles.
+- **`ssh_save_profile`**: Save host, username, key path, port, passphrase, or password into persistent storage.
+- **`ssh_connect`**: Connect or verify an active session using a profile name or direct host details.
+- **`ssh_list_sessions`**: Inspect all active sessions, their hostnames, uptime, and active default flag.
+- **`ssh_switch_session`**: Set which open SSH session acts as default for subsequent commands.
+- **`ssh_broadcast`**: Run a command concurrently across all or a selected list of remote servers.
+- **`ssh_close`**: Terminate and clean up an active connection.
 
-// Agent executes a command on 'staging' profile (no re-auth needed next time)
-await tools.ssh.ssh_exec({
-  sessionID: "staging",
-  command: "docker ps -a"
-})
-```
+### Execution & Interactive Terminal
+- **`ssh_exec`**: Discrete multiplexed remote execution channel returning `{ stdout, stderr, exitCode, durationMs }`.
+- **`ssh_interactive_cmd`**: Run a command in the persistent PTY shell preserving environment variables, working directory, and REPL state.
+- **`ssh_pty_send`**: Send raw keystrokes, answers to interactive prompts, passwords, or signals (`\x03` Ctrl+C).
+- **`ssh_pty_read`**: Read recent terminal output buffer lines.
 
-### Example 2: Interactive Session State (Virtualenv & Directory Persistence)
-```ts
-// Navigate and activate virtual environment in the persistent PTY
-await tools.ssh.ssh_interactive_cmd({
-  command: "cd /opt/myapp && source venv/bin/activate"
-})
+### SFTP Remote Filesystem
+- **`ssh_read_file`**: Read remote file content with line numbers, offset, and pagination.
+- **`ssh_write_file`**: Atomically create or overwrite a remote file over SFTP.
+- **`ssh_edit_file`**: Targeted search-and-replace (`oldString` -> `newString`) with match validation.
 
-// Run python inside the same active environment
-await tools.ssh.ssh_interactive_cmd({
-  command: "python manage.py migrate"
-})
-```
+### Background Jobs & System Diagnostics
+- **`ssh_system_inspect`**: Complete environment health check in 1 call.
+- **`ssh_job_spawn`**: Spawn supervised background task (returns job ID immediately).
+- **`ssh_job_status`**: Poll job status, liveness, and exit code.
+- **`ssh_job_logs`**: Retrieve real-time tail of job stdout/stderr.
+- **`ssh_job_kill`**: Send `SIGTERM`, `SIGINT`, or `SIGKILL` to remote background job.
+
+---
+
+## TUI Extension
+
+The plugin also includes OpenCode CLI/TUI hooks (`src/tui.ts`):
+- `/ssh-profiles`: Quick slash command to check configured profiles.
+- `/ssh-disconnect-all`: Fast dialog to disconnect all active remote sessions.
+- Status bar indicator on the OpenCode TUI footer.
