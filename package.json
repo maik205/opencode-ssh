@@ -1,27 +1,46 @@
 {
   "name": "opencode-ssh",
   "version": "0.1.0",
-  "description": "Interactive persistent SSH session and profile manager plugin for OpenCode v2",
+  "description": "Persistent interactive SSH sessions, profiles, remote SFTP editing, and background job supervision for OpenCode v2",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsup && tsc --emitDeclarationOnly --declaration",
     "dev": "tsup src/index.ts --format esm --watch",
     "test": "vitest run"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maik205/opencode-ssh.git"
+  },
+  "bugs": {
+    "url": "https://github.com/maik205/opencode-ssh/issues"
+  },
+  "homepage": "https://github.com/maik205/opencode-ssh#readme",
   "keywords": [
     "opencode",
     "opencode-plugin",
     "ssh",
     "ssh2",
+    "sftp",
     "pty",
-    "remote"
+    "terminal",
+    "remote-development",
+    "agentic-workflow"
   ],
-  "author": "",
+  "author": "maik205",
   "license": "MIT",
   "dependencies": {
     "ssh-config": "^5.3.0",

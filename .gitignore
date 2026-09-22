@@ -1,3 +1,14 @@
-node_modules
-dist
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+
+# Logs & temp files
 *.log
+.DS_Store
+Thumbs.db
+*.local
+
+# Tests coverage
+coverage/
