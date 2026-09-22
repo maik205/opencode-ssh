@@ -1,0 +1,42 @@
+{
+  "name": "opencode-ssh",
+  "version": "0.1.0",
+  "description": "Interactive persistent SSH session and profile manager plugin for OpenCode v2",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup && tsc --emitDeclarationOnly --declaration",
+    "dev": "tsup src/index.ts --format esm --watch",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "ssh",
+    "ssh2",
+    "pty",
+    "remote"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "ssh-config": "^5.3.0",
+    "ssh2": "^1.17.0"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "^2.0.12",
+    "@types/node": "^26.6.2",
+    "@types/ssh2": "^1.15.6",
+    "tsup": "^8.5.1",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.7",
+    "zod": "^3.24.2"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.0.0"
+  }
+}
