@@ -55,8 +55,9 @@ All tools are registered under the `ssh` namespace:
 - `ssh_broadcast`: Run a command across multiple connected sessions.
 
 ### Execution & PTY
-- `ssh_exec`: Run a non-interactive command and return stdout, stderr, and exit code.
-- `ssh_interactive_cmd`: Execute commands inside a persistent PTY shell.
+- `ssh_exec`: Run a non-interactive command and return stdout, stderr, exit code, and `executedAs`.
+- `ssh_interactive_cmd`: Execute commands inside a persistent PTY shell (returns output and `executedAs`).
+- `ssh_switch_user`: Switch user (e.g. to `root`) in the persistent shell via `sudo`/`su` with automatic password handling.
 - `ssh_pty_send`: Send raw text or control characters (e.g. `\x03`) to the PTY.
 - `ssh_pty_read`: Retrieve recent buffer output from the PTY shell.
 

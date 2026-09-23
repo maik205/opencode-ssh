@@ -242,6 +242,7 @@ export default Plugin.define({
             return successResult({
               command,
               output,
+              executedAs: session.currentPtyUser || session.username,
             })
           } catch (err: any) {
             return errorResult("PTY_EXEC_FAILED", err.message || String(err))
@@ -277,6 +278,54 @@ export default Plugin.define({
           await new Promise((r) => setTimeout(r, 400))
           const recent = session.getRecentOutput(50)
           return successResult({ message: "Input sent", recentOutput: recent })
+        },
+      })
+
+      // 8. ssh_switch_user
+      editor.add({
+        name: "ssh_switch_user",
+        description: "Switch user (e.g. to 'root' or another system account) in the persistent remote shell using sudo/su. Can accept sudo password if required.",
+        input: {
+          type: "object",
+          properties: {
+            user: { type: "string", description: "Target username to switch to (default: 'root')" },
+            password: { type: "string", description: "User password or sudo password if prompted" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
+            timeoutMs: { type: "number", description: "Timeout in ms for the switch operation (default 8000)" },
+          },
+          additionalProperties: false,
+        },
+        options: { namespace: "ssh", codemode: true },
+        execute: async (input, context) => {
+          const { user = "root", password, sessionID, timeoutMs } = input as any
+          let session = sessionManager.getSession(sessionID)
+          if (!session || !session.isOpen()) {
+            session = await sessionManager.getOrCreateSession(sessionID)
+          }
+
+          await context.progress({ status: `Switching to user '${user}' on ${session.host}...` })
+
+          try {
+            const result = await session.switchUserInPty(user, password, timeoutMs || 8000)
+            if (result.success) {
+              return successResult({
+                user: result.user,
+                host: session.host,
+                message: `Successfully switched to user '${result.user}'. Subsequent ssh_interactive_cmd calls will execute as this user.`,
+                output: result.output,
+              })
+            } else {
+              return errorResult(
+                "USER_SWITCH_FAILED",
+                `Failed to switch to user '${user}'. Current user is still '${result.user}'.`,
+                result.output.toLowerCase().includes("password")
+                  ? "Password was incorrect or required. Pass the 'password' parameter."
+                  : "Check user permissions or sudoers configuration on remote host."
+              )
+            }
+          } catch (err: any) {
+            return errorResult("USER_SWITCH_ERROR", err.message || String(err))
+          }
         },
       })
 

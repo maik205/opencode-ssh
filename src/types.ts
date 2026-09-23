@@ -17,6 +17,7 @@ export interface ExecResult {
   exitCode: number | null
   signal?: string
   durationMs: number
+  executedAs?: string
 }
 
 export interface PtyOutputChunk {

@@ -3,6 +3,7 @@ import path from "node:path"
 import os from "node:os"
 import { Client, type ClientChannel, type ConnectConfig } from "ssh2"
 import type { ExecResult, InteractiveSessionInfo, PtyOutputChunk, SSHAuthProfile } from "./types.js"
+import { stripAnsi } from "./strip-ansi.js"
 import { SFTPManager } from "./sftp-manager.js"
 import { JobManager } from "./job-manager.js"
 
@@ -23,6 +24,7 @@ export class SSHSession {
   public readonly host: string
   public readonly port: number
   public readonly username: string
+  public currentPtyUser?: string
   public connectedAt: number = 0
   public lastActiveAt: number = 0
 
@@ -194,11 +196,12 @@ export class SSHSession {
           exitSignal = signal
           this.lastActiveAt = Date.now()
           resolve({
-            stdout,
-            stderr,
+            stdout: stripAnsi(stdout),
+            stderr: stripAnsi(stderr),
             exitCode,
             signal: exitSignal,
             durationMs: Date.now() - startTime,
+            executedAs: this.username,
           })
         })
 
@@ -306,7 +309,8 @@ export class SSHSession {
 
   getRecentOutput(linesLimit: number = 100): string {
     const raw = this.outputBuffer.map((c) => c.data).join("")
-    const lines = raw.split(/\r?\n/)
+    const cleaned = stripAnsi(raw)
+    const lines = cleaned.split(/\r?\n/)
     return lines.slice(-linesLimit).join("\n")
   }
 
@@ -336,15 +340,9 @@ export class SSHSession {
           if (!resolved) {
             resolved = true
             cleanup()
-            // Clean ANSI escape codes, OSC sequences, and the marker command from output
-            const ansiRegex = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g
-            const oscRegex = /\u001b\][^\u001b\u0007]*(\u001b\\|\u0007)/g
-            const cleaned = captured
+            const cleaned = stripAnsi(captured)
               .replace(new RegExp(`echo\\s+["']?${marker}["']?`, "g"), "")
               .replace(new RegExp(marker, "g"), "")
-              .replace(oscRegex, "")
-              .replace(ansiRegex, "")
-              .replace(/\r\n/g, "\n")
               .trim()
             resolve(cleaned)
           }
@@ -369,6 +367,75 @@ export class SSHSession {
       // Execute command followed by echo marker
       const fullCmd = `${command}\necho "${marker}"\n`
       this.writePty(fullCmd)
+    })
+  }
+
+  /**
+   * Switch the current user in the persistent PTY shell (su or sudo -i -u).
+   * Automatically handles password prompt if a password is supplied.
+   */
+  async switchUserInPty(
+    targetUser: string = "root",
+    password?: string,
+    timeoutMs: number = 10000
+  ): Promise<{ success: boolean; user: string; output: string }> {
+    if (!this.hasPty()) {
+      await this.startPty()
+    }
+
+    const cmd = targetUser === "root" ? "sudo -i || su -" : `sudo -i -u ${targetUser} || su - ${targetUser}`
+    let captured = ""
+
+    return new Promise((resolve) => {
+      let timer: NodeJS.Timeout | null = null
+      let passwordSent = false
+
+      const listener = (chunk: PtyOutputChunk) => {
+        captured += chunk.data
+        const lower = captured.toLowerCase()
+
+        // If prompted for password and password was provided, send it
+        if (!passwordSent && (lower.includes("[sudo] password") || lower.includes("password:") || lower.includes("passphrase:"))) {
+          if (password) {
+            passwordSent = true
+            this.writePty(`${password}\n`)
+          }
+        }
+      }
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer)
+        this.onDataCallbacks.delete(listener)
+      }
+
+      this.onDataCallbacks.add(listener)
+
+      // Send the su/sudo command
+      this.writePty(`${cmd}\n`)
+
+      timer = setTimeout(async () => {
+        cleanup()
+        // Check whoami now in the PTY
+        try {
+          const whoamiRes = await this.runInPty("whoami", 5000)
+          const current = whoamiRes.trim().split("\n").pop()?.trim() || ""
+          const isTarget = current === targetUser || (targetUser === "root" && current === "root")
+          if (isTarget) {
+            this.currentPtyUser = current
+          }
+          resolve({
+            success: isTarget,
+            user: current,
+            output: stripAnsi(captured).trim(),
+          })
+        } catch (e: any) {
+          resolve({
+            success: false,
+            user: "unknown",
+            output: stripAnsi(captured).trim(),
+          })
+        }
+      }, timeoutMs)
     })
   }
 
