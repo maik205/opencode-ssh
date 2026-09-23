@@ -31,6 +31,16 @@ Or install as a dependency:
 npm install -D opencode-plugin-ssh
 ```
 
+You can also install directly from GitHub:
+
+```jsonc
+{
+  "plugin": [
+    "git+https://github.com/maik205/opencode-ssh.git"
+  ]
+}
+```
+
 ## Tools
 
 All tools are registered under the `ssh` namespace:
