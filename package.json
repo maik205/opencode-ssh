@@ -22,6 +22,7 @@
   ],
   "scripts": {
     "build": "tsup && tsc --emitDeclarationOnly --declaration",
+    "prepack": "npm run build",
     "dev": "tsup src/index.ts --format esm --watch",
     "test": "vitest run"
   },
