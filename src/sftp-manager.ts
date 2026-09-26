@@ -3,6 +3,7 @@ import os from "node:os"
 import path from "node:path"
 import type { Client, SFTPWrapper, Stats, FileEntryWithStats, TransferOptions } from "ssh2"
 import { withTimeout } from "./agent-response.js"
+import { smartEditMatchAndReplace } from "./string-utils.js"
 import type { SFTPFileEntry, SFTPListDirResult, SFTPStatResult } from "./types.js"
 
 export function formatOctalMode(mode: number): string {
@@ -189,30 +190,29 @@ export class SFTPManager {
       })
     })
 
-    // 2. Count occurrences
-    const occurrences = rawContent.split(oldString).length - 1
-
-    if (occurrences === 0) {
-      throw new Error(`oldString was not found in '${resolvedPath}'.`)
-    }
-
-    if (occurrences > 1 && !replaceAll) {
-      throw new Error(
-        `oldString matched ${occurrences} times in '${resolvedPath}'. Provide more surrounding context to match uniquely, or set replaceAll to true.`
+    try {
+      const { updatedContent, replacements } = smartEditMatchAndReplace(
+        rawContent,
+        oldString,
+        newString,
+        replaceAll
       )
-    }
 
-    // 3. Perform replacement
-    const updatedContent = replaceAll
-      ? rawContent.split(oldString).join(newString)
-      : rawContent.replace(oldString, newString)
+      // 2. Write updated content
+      await this.writeFile(resolvedPath, updatedContent)
 
-    // 4. Write updated content
-    await this.writeFile(resolvedPath, updatedContent)
-
-    return {
-      replacements: replaceAll ? occurrences : 1,
-      totalLines: updatedContent.split(/\r?\n/).length,
+      return {
+        replacements,
+        totalLines: updatedContent.split(/\r?\n/).length,
+      }
+    } catch (err: any) {
+      if (err.message === "oldString was not found.") {
+        throw new Error(`oldString was not found in '${resolvedPath}'.`)
+      }
+      if (err.message.includes("matched") && !err.message.includes(resolvedPath)) {
+        throw new Error(err.message.replace("times", `times in '${resolvedPath}'`))
+      }
+      throw err
     }
   }
 

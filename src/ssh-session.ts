@@ -3,7 +3,7 @@ import path from "node:path"
 import os from "node:os"
 import { Client, type ClientChannel, type ConnectConfig } from "ssh2"
 import type { ExecResult, InteractiveSessionInfo, PtyOutputChunk, SSHAuthProfile } from "./types.js"
-import { stripAnsi } from "./strip-ansi.js"
+import { cleanOutput, normalizeCommand, stripAnsi } from "./string-utils.js"
 import { SFTPManager } from "./sftp-manager.js"
 import { JobManager } from "./job-manager.js"
 
@@ -159,14 +159,19 @@ export class SSHSession {
     if (!this.isConnected) {
       throw new Error(`SSH Session '${this.id}' is not connected.`)
     }
-    this.lastActiveAt = Date.now()
 
+    const normCmd = normalizeCommand(command)
+    if (!normCmd) {
+      throw new Error("Command cannot be empty or whitespace only.")
+    }
+
+    this.lastActiveAt = Date.now()
     const startTime = Date.now()
 
     return new Promise<ExecResult>((resolve, reject) => {
       let timer: NodeJS.Timeout | null = null
 
-      this.client.exec(command, (err, stream) => {
+      this.client.exec(normCmd, (err, stream) => {
         if (err) return reject(err)
         if (!stream) return reject(new Error("SSH channel creation failed: empty stream."))
 
@@ -178,7 +183,7 @@ export class SSHSession {
         if (timeoutMs > 0) {
           timer = setTimeout(() => {
             stream.close()
-            reject(new Error(`Command timed out after ${timeoutMs}ms: ${command}`))
+            reject(new Error(`Command timed out after ${timeoutMs}ms: ${normCmd}`))
           }, timeoutMs)
         }
 
@@ -196,8 +201,8 @@ export class SSHSession {
           exitSignal = signal
           this.lastActiveAt = Date.now()
           resolve({
-            stdout: stripAnsi(stdout),
-            stderr: stripAnsi(stderr),
+            stdout: cleanOutput(stdout),
+            stderr: cleanOutput(stderr),
             exitCode,
             signal: exitSignal,
             durationMs: Date.now() - startTime,
@@ -304,13 +309,14 @@ export class SSHSession {
       throw new Error(`Session '${this.id}' has no active PTY shell. Call ssh_session_open first.`)
     }
     this.lastActiveAt = Date.now()
-    this.shellChannel?.write(input)
+    const normalized = typeof input === "string" ? input.replace(/\r\n/g, "\n") : input
+    this.shellChannel?.write(normalized)
   }
 
   getRecentOutput(linesLimit: number = 100): string {
     const raw = this.outputBuffer.map((c) => c.data).join("")
-    const cleaned = stripAnsi(raw)
-    const lines = cleaned.split(/\r?\n/)
+    const cleaned = cleanOutput(raw)
+    const lines = cleaned.split("\n")
     return lines.slice(-linesLimit).join("\n")
   }
 
@@ -327,6 +333,11 @@ export class SSHSession {
       await this.startPty()
     }
 
+    const normCmd = normalizeCommand(command)
+    if (!normCmd) {
+      throw new Error("Command cannot be empty or whitespace only.")
+    }
+
     const marker = `__OC_SSH_SENTINEL_${Math.random().toString(36).substring(2, 9)}__`
     let captured = ""
     let resolved = false
@@ -340,7 +351,7 @@ export class SSHSession {
           if (!resolved) {
             resolved = true
             cleanup()
-            const cleaned = stripAnsi(captured)
+            const cleaned = cleanOutput(captured)
               .replace(new RegExp(`echo\\s+["']?${marker}["']?`, "g"), "")
               .replace(new RegExp(marker, "g"), "")
               .trim()
@@ -360,12 +371,12 @@ export class SSHSession {
         timer = setTimeout(() => {
           cleanup()
           // Return whatever was captured so far even on timeout so agent can see prompt
-          resolve(captured.trim() + `\n[Wait timed out after ${timeoutMs}ms]`)
+          resolve(cleanOutput(captured) + `\n[Wait timed out after ${timeoutMs}ms]`)
         }, timeoutMs)
       }
 
       // Execute command followed by echo marker
-      const fullCmd = `${command}\necho "${marker}"\n`
+      const fullCmd = `${normCmd}\necho "${marker}"\n`
       this.writePty(fullCmd)
     })
   }

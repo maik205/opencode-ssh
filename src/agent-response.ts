@@ -1,3 +1,5 @@
+import { pruneEmpty } from "./string-utils.js"
+
 export interface AgentToolResult<T = any> {
   success: boolean
   data?: T
@@ -10,15 +12,17 @@ export interface AgentToolResult<T = any> {
 }
 
 export function successResult<T>(data: T): { content: string } {
+  const payload = (typeof data === "object" && data !== null && !Array.isArray(data))
+    ? data
+    : { result: data }
+
+  const pruned = pruneEmpty(payload)
+
   return {
-    content: JSON.stringify(
-      {
-        success: true,
-        ...((typeof data === "object" && data !== null && !Array.isArray(data)) ? data : { result: data }),
-      },
-      null,
-      2
-    ),
+    content: JSON.stringify({
+      success: true,
+      ...pruned,
+    }),
   }
 }
 
@@ -28,20 +32,15 @@ export function errorResult(
   hint?: string,
   details?: any
 ): { content: string } {
+  const errorObj: Record<string, any> = { code, message }
+  if (hint) errorObj.hint = hint
+  if (details !== undefined && details !== null) errorObj.details = details
+
   return {
-    content: JSON.stringify(
-      {
-        success: false,
-        error: {
-          code,
-          message,
-          hint,
-          details,
-        },
-      },
-      null,
-      2
-    ),
+    content: JSON.stringify({
+      success: false,
+      error: errorObj,
+    }),
   }
 }
 

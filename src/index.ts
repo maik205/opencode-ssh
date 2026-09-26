@@ -4,6 +4,12 @@ import { SessionManager } from "./session-manager.js"
 import { ConfigManager } from "./config.js"
 import { errorResult, successResult } from "./agent-response.js"
 import { formatBytes } from "./sftp-manager.js"
+import {
+  normalizeCommand,
+  normalizePath,
+  truncateOutput,
+  DEFAULT_MAX_OUTPUT_CHARS,
+} from "./string-utils.js"
 
 export default Plugin.define({
   id: "opencode-ssh",
@@ -21,7 +27,7 @@ export default Plugin.define({
       // 1. ssh_list_profiles
       editor.add({
         name: "ssh_list_profiles",
-        description: "List all available SSH profiles configured in ~/.ssh/config or saved in OpenCode.",
+        description: "List configured SSH profiles from ~/.ssh/config and OpenCode storage.",
         input: {
           type: "object",
           properties: {},
@@ -50,18 +56,18 @@ export default Plugin.define({
       // 2. ssh_save_profile
       editor.add({
         name: "ssh_save_profile",
-        description: "Save or update an SSH connection profile with host, user, port, and authentication credentials.",
+        description: "Save or update an SSH connection profile.",
         input: {
           type: "object",
           properties: {
-            name: { type: "string", description: "Profile identifier name (e.g. 'prod-server', 'staging')" },
+            name: { type: "string", description: "Profile identifier (e.g. 'prod', 'staging')" },
             host: { type: "string", description: "Hostname or IP address" },
             port: { type: "number", description: "SSH port (default: 22)" },
             username: { type: "string", description: "Remote username" },
-            privateKeyPath: { type: "string", description: "Path to SSH private key file" },
-            password: { type: "string", description: "SSH password (optional)" },
-            passphrase: { type: "string", description: "Passphrase for encrypted private key (optional)" },
-            description: { type: "string", description: "Optional notes about this profile" },
+            privateKeyPath: { type: "string", description: "Path to private key file" },
+            password: { type: "string", description: "SSH password" },
+            passphrase: { type: "string", description: "Private key passphrase" },
+            description: { type: "string", description: "Profile notes" },
           },
           required: ["name", "host"],
           additionalProperties: false,
@@ -71,16 +77,16 @@ export default Plugin.define({
           try {
             const p = input as any
             await configManager.save({
-              name: p.name,
-              host: p.host,
+              name: p.name?.trim(),
+              host: p.host?.trim(),
               port: p.port || 22,
-              username: p.username,
-              privateKeyPath: p.privateKeyPath,
+              username: p.username?.trim(),
+              privateKeyPath: p.privateKeyPath ? normalizePath(p.privateKeyPath) : undefined,
               password: p.password,
               passphrase: p.passphrase,
-              description: p.description,
+              description: p.description?.trim(),
             })
-            return successResult({ message: `Profile '${p.name}' saved successfully.`, profile: p.name })
+            return successResult({ message: `Profile '${p.name?.trim()}' saved successfully.`, profile: p.name?.trim() })
           } catch (err: any) {
             return errorResult("SAVE_PROFILE_FAILED", err.message, "Ensure storage directory is writable.")
           }
@@ -90,13 +96,13 @@ export default Plugin.define({
       // 3. ssh_connect
       editor.add({
         name: "ssh_connect",
-        description: "Open or verify an active SSH session using an existing profile name or direct connection details. Reuses existing session without reauthing.",
+        description: "Open or verify active SSH session by profile or host details.",
         input: {
           type: "object",
           properties: {
-            sessionID: { type: "string", description: "Optional session ID. If not provided, defaults to profile name or 'default'." },
-            profile: { type: "string", description: "Name of the profile (from ~/.ssh/config or saved profiles)" },
-            host: { type: "string", description: "Direct hostname or IP" },
+            sessionID: { type: "string", description: "Session ID (defaults to profile name or 'default')" },
+            profile: { type: "string", description: "Profile name from ~/.ssh/config or saved profiles" },
+            host: { type: "string", description: "Hostname or IP" },
             port: { type: "number", description: "SSH port (default 22)" },
             username: { type: "string", description: "Remote username" },
             password: { type: "string", description: "Remote password" },
@@ -108,17 +114,17 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const p = input as any
-          const targetSessionId = p.sessionID || p.profile || "default"
+          const targetSessionId = p.sessionID?.trim() || p.profile?.trim() || "default"
 
           await context.progress({ status: `Connecting to SSH ${p.host || p.profile || targetSessionId}...` })
 
           try {
             const session = await sessionManager.getOrCreateSession(targetSessionId, {
-              host: p.host,
+              host: p.host?.trim(),
               port: p.port,
-              username: p.username,
+              username: p.username?.trim(),
               password: p.password,
-              privateKeyPath: p.privateKeyPath,
+              privateKeyPath: p.privateKeyPath ? normalizePath(p.privateKeyPath) : undefined,
               passphrase: p.passphrase,
             })
 
@@ -160,25 +166,31 @@ export default Plugin.define({
       // 5. ssh_exec
       editor.add({
         name: "ssh_exec",
-        description: "Execute a single remote command over SSH multiplexing (fast, non-interactive) and return stdout, stderr, and exit code. Automatically reuses active authenticated session.",
+        description: "Run remote shell command via SSH; returns stdout, stderr, exit code.",
         input: {
           type: "object",
           properties: {
-            command: { type: "string", description: "The shell command to run on the remote machine" },
-            sessionID: { type: "string", description: "Target session ID or profile name (optional)" },
-            timeoutMs: { type: "number", description: "Execution timeout in milliseconds (default: 60000 ms)" },
+            command: { type: "string", description: "Shell command to run on remote host" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
+            timeoutMs: { type: "number", description: "Execution timeout in ms (default: 60000)" },
+            maxOutputChars: { type: "number", description: "Max characters before truncating (default: 30000)" },
           },
           required: ["command"],
           additionalProperties: false,
         },
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
-          const { command, sessionID, timeoutMs } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const { command, sessionID, timeoutMs, maxOutputChars } = input as any
+          const normCmd = normalizeCommand(command)
+          if (!normCmd) {
+            return errorResult("EMPTY_COMMAND", "Command cannot be empty or whitespace only.")
+          }
+
+          let session = sessionManager.getSession(sessionID?.trim())
 
           if (!session || !session.isOpen()) {
             try {
-              session = await sessionManager.getOrCreateSession(sessionID)
+              session = await sessionManager.getOrCreateSession(sessionID?.trim())
             } catch (err: any) {
               return errorResult(
                 "SESSION_CONNECT_FAILED",
@@ -188,14 +200,36 @@ export default Plugin.define({
             }
           }
 
-          await context.progress({ status: `Running: ${command.slice(0, 45)}...` })
+          await context.progress({ status: `Running: ${normCmd.slice(0, 45)}...` })
 
           try {
-            const res = await session.exec(command, timeoutMs || 60000)
-            return successResult({
-              command,
-              ...res,
-            })
+            const res = await session.exec(normCmd, timeoutMs || 60000)
+            const maxChars = typeof maxOutputChars === "number" && maxOutputChars > 0 ? maxOutputChars : DEFAULT_MAX_OUTPUT_CHARS
+            const truncStdout = truncateOutput(res.stdout, maxChars)
+            const truncStderr = res.stderr ? truncateOutput(res.stderr, maxChars) : undefined
+
+            const resultPayload: Record<string, any> = {
+              stdout: truncStdout.text,
+              exitCode: res.exitCode,
+            }
+            if (truncStdout.truncated) {
+              resultPayload.stdoutTruncated = true
+              resultPayload.totalLines = truncStdout.originalLines
+              resultPayload.totalBytes = truncStdout.originalBytes
+            }
+            if (truncStderr && truncStderr.text) {
+              resultPayload.stderr = truncStderr.text
+              if (truncStderr.truncated) {
+                resultPayload.stderrTruncated = true
+              }
+            }
+            if (res.signal) {
+              resultPayload.signal = res.signal
+            }
+            resultPayload.durationMs = res.durationMs
+            resultPayload.executedAs = res.executedAs
+
+            return successResult(resultPayload)
           } catch (err: any) {
             return errorResult(
               "EXEC_FAILED",
@@ -209,25 +243,31 @@ export default Plugin.define({
       // 6. ssh_interactive_cmd
       editor.add({
         name: "ssh_interactive_cmd",
-        description: "Run a command inside a persistent PTY shell with environment/state preservation across calls (cd, export, virtualenvs).",
+        description: "Run command in persistent PTY shell (preserves cd, exports, env).",
         input: {
           type: "object",
           properties: {
             command: { type: "string", description: "Command to execute inside persistent shell" },
             sessionID: { type: "string", description: "Session ID or profile name (optional)" },
-            timeoutMs: { type: "number", description: "Timeout in ms to wait for output (default 30000)" },
+            timeoutMs: { type: "number", description: "Timeout in ms to wait for output (default: 30000)" },
+            maxOutputChars: { type: "number", description: "Max characters before truncating (default: 30000)" },
           },
           required: ["command"],
           additionalProperties: false,
         },
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
-          const { command, sessionID, timeoutMs } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const { command, sessionID, timeoutMs, maxOutputChars } = input as any
+          const normCmd = normalizeCommand(command)
+          if (!normCmd) {
+            return errorResult("EMPTY_COMMAND", "Command cannot be empty or whitespace only.")
+          }
+
+          let session = sessionManager.getSession(sessionID?.trim())
 
           if (!session || !session.isOpen()) {
             try {
-              session = await sessionManager.getOrCreateSession(sessionID)
+              session = await sessionManager.getOrCreateSession(sessionID?.trim())
             } catch (err: any) {
               return errorResult(
                 "SESSION_CONNECT_FAILED",
@@ -237,15 +277,24 @@ export default Plugin.define({
             }
           }
 
-          await context.progress({ status: `Executing in PTY: ${command.slice(0, 40)}...` })
+          await context.progress({ status: `Executing in PTY: ${normCmd.slice(0, 40)}...` })
 
           try {
-            const output = await session.runInPty(command, timeoutMs || 30000)
-            return successResult({
-              command,
-              output,
+            const rawOutput = await session.runInPty(normCmd, timeoutMs || 30000)
+            const maxChars = typeof maxOutputChars === "number" && maxOutputChars > 0 ? maxOutputChars : DEFAULT_MAX_OUTPUT_CHARS
+            const trunc = truncateOutput(rawOutput, maxChars)
+
+            const resultPayload: Record<string, any> = {
+              output: trunc.text,
               executedAs: session.currentPtyUser || session.username,
-            })
+            }
+            if (trunc.truncated) {
+              resultPayload.outputTruncated = true
+              resultPayload.totalLines = trunc.originalLines
+              resultPayload.totalBytes = trunc.originalBytes
+            }
+
+            return successResult(resultPayload)
           } catch (err: any) {
             return errorResult("PTY_EXEC_FAILED", err.message || String(err))
           }
@@ -267,8 +316,8 @@ export default Plugin.define({
         },
         options: { namespace: "ssh", codemode: true },
         execute: async (input) => {
-          const { input: text, sessionID } = input as any
-          const session = sessionManager.getSession(sessionID)
+          const { input: rawInput, sessionID } = input as any
+          const session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
             return errorResult("SESSION_NOT_OPEN", `Session '${sessionID || "default"}' is not open.`)
           }
@@ -276,6 +325,7 @@ export default Plugin.define({
             return errorResult("NO_ACTIVE_PTY", "No active PTY shell found. Call ssh_interactive_cmd first.")
           }
 
+          const text = typeof rawInput === "string" ? rawInput.replace(/\r\n/g, "\n") : ""
           session.writePty(text)
           await new Promise((r) => setTimeout(r, 400))
           const recent = session.getRecentOutput(50)
@@ -286,29 +336,30 @@ export default Plugin.define({
       // 8. ssh_switch_user
       editor.add({
         name: "ssh_switch_user",
-        description: "Switch user (e.g. to 'root' or another system account) in the persistent remote shell using sudo/su. Can accept sudo password if required.",
+        description: "Switch user (e.g. to root) in persistent PTY shell using sudo/su.",
         input: {
           type: "object",
           properties: {
             user: { type: "string", description: "Target username to switch to (default: 'root')" },
-            password: { type: "string", description: "User password or sudo password if prompted" },
+            password: { type: "string", description: "User or sudo password if prompted" },
             sessionID: { type: "string", description: "Session ID or profile name (optional)" },
-            timeoutMs: { type: "number", description: "Timeout in ms for the switch operation (default 8000)" },
+            timeoutMs: { type: "number", description: "Timeout in ms for the switch operation (default: 8000)" },
           },
           additionalProperties: false,
         },
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const { user = "root", password, sessionID, timeoutMs } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const targetUser = user?.trim() || "root"
+          let session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+            session = await sessionManager.getOrCreateSession(sessionID?.trim())
           }
 
-          await context.progress({ status: `Switching to user '${user}' on ${session.host}...` })
+          await context.progress({ status: `Switching to user '${targetUser}' on ${session.host}...` })
 
           try {
-            const result = await session.switchUserInPty(user, password, timeoutMs || 8000)
+            const result = await session.switchUserInPty(targetUser, password, timeoutMs || 8000)
             if (result.success) {
               return successResult({
                 user: result.user,
@@ -319,7 +370,7 @@ export default Plugin.define({
             } else {
               return errorResult(
                 "USER_SWITCH_FAILED",
-                `Failed to switch to user '${user}'. Current user is still '${result.user}'.`,
+                `Failed to switch to user '${targetUser}'. Current user is still '${result.user}'.`,
                 result.output.toLowerCase().includes("password")
                   ? "Password was incorrect or required. Pass the 'password' parameter."
                   : "Check user permissions or sudoers configuration on remote host."
@@ -331,22 +382,22 @@ export default Plugin.define({
         },
       })
 
-      // 8. ssh_pty_read
+      // 9. ssh_pty_read
       editor.add({
         name: "ssh_pty_read",
-        description: "Read the most recent terminal buffer lines from the interactive PTY shell.",
+        description: "Read recent terminal buffer lines from interactive PTY.",
         input: {
           type: "object",
           properties: {
             sessionID: { type: "string", description: "Session ID or profile name (optional)" },
-            lines: { type: "number", description: "Number of lines to read (default 100)" },
+            lines: { type: "number", description: "Number of lines to read (default: 100)" },
           },
           additionalProperties: false,
         },
         options: { namespace: "ssh", codemode: true },
         execute: async (input) => {
           const { sessionID, lines } = input as any
-          const session = sessionManager.getSession(sessionID)
+          const session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
             return errorResult("SESSION_NOT_OPEN", `Session '${sessionID || "default"}' is not open.`)
           }
@@ -358,15 +409,15 @@ export default Plugin.define({
 
       // === SFTP Remote File Operations ===
 
-      // 9. ssh_read_file
+      // 10. ssh_read_file
       editor.add({
         name: "ssh_read_file",
-        description: "Read remote file content over SFTP with line numbers, offset, and limit support.",
+        description: "Read remote file over SFTP with pagination and line numbering.",
         input: {
           type: "object",
           properties: {
-            path: { type: "string", description: "Remote absolute or relative file path" },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            path: { type: "string", description: "Remote file path" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
             offset: { type: "number", description: "1-based line number to start reading from (default: 1)" },
             limit: { type: "number", description: "Maximum lines to read (default: 2000)" },
           },
@@ -376,16 +427,17 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const { path: filePath, sessionID, offset, limit } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const cleanPath = normalizePath(filePath)
+          let session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+            session = await sessionManager.getOrCreateSession(sessionID?.trim())
           }
 
-          await context.progress({ status: `Reading remote file: ${filePath}...` })
+          await context.progress({ status: `Reading remote file: ${cleanPath}...` })
           try {
-            const res = await session.sftp.readFile(filePath, offset || 1, limit || 2000)
+            const res = await session.sftp.readFile(cleanPath, offset || 1, limit || 2000)
             return successResult({
-              path: filePath,
+              path: cleanPath,
               totalLines: res.totalLines,
               offset: offset || 1,
               hasMore: res.hasMore,
@@ -401,16 +453,16 @@ export default Plugin.define({
         },
       })
 
-      // 10. ssh_write_file
+      // 11. ssh_write_file
       editor.add({
         name: "ssh_write_file",
-        description: "Atomically write or overwrite a file on the remote machine over SFTP.",
+        description: "Write or overwrite a file on the remote machine over SFTP.",
         input: {
           type: "object",
           properties: {
             path: { type: "string", description: "Remote file path to write to" },
             content: { type: "string", description: "Complete content to write to the remote file" },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           required: ["path", "content"],
           additionalProperties: false,
@@ -418,18 +470,19 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const { path: filePath, content, sessionID } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const cleanPath = normalizePath(filePath)
+          let session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+            session = await sessionManager.getOrCreateSession(sessionID?.trim())
           }
 
-          await context.progress({ status: `Writing remote file: ${filePath}...` })
+          await context.progress({ status: `Writing remote file: ${cleanPath}...` })
           try {
-            await session.sftp.writeFile(filePath, content)
+            await session.sftp.writeFile(cleanPath, content)
             return successResult({
-              path: filePath,
+              path: cleanPath,
               bytesWritten: Buffer.byteLength(content, "utf-8"),
-              message: `Successfully wrote file: ${filePath}`,
+              message: `Successfully wrote file: ${cleanPath}`,
             })
           } catch (err: any) {
             return errorResult(
@@ -441,10 +494,10 @@ export default Plugin.define({
         },
       })
 
-      // 11. ssh_edit_file
+      // 12. ssh_edit_file
       editor.add({
         name: "ssh_edit_file",
-        description: "Targeted search-and-replace edit on a remote file over SFTP (mirrors OpenCode's native edit tool).",
+        description: "Find and replace exact text in a remote file over SFTP.",
         input: {
           type: "object",
           properties: {
@@ -453,9 +506,9 @@ export default Plugin.define({
             newString: { type: "string", description: "Text to replace oldString with (must differ)" },
             replaceAll: {
               type: "boolean",
-              description: "Whether to replace every occurrence (default: false, requiring exactly one match)",
+              description: "Whether to replace every occurrence (default: false, requiring single match)",
             },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           required: ["path", "oldString", "newString"],
           additionalProperties: false,
@@ -463,49 +516,50 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const { path: filePath, oldString, newString, replaceAll, sessionID } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const cleanPath = normalizePath(filePath)
+          let session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+            session = await sessionManager.getOrCreateSession(sessionID?.trim())
           }
 
-          await context.progress({ status: `Editing remote file: ${filePath}...` })
+          await context.progress({ status: `Editing remote file: ${cleanPath}...` })
           try {
-            const res = await session.sftp.editFile(filePath, oldString, newString, replaceAll || false)
+            const res = await session.sftp.editFile(cleanPath, oldString, newString, replaceAll || false)
             return successResult({
-              path: filePath,
+              path: cleanPath,
               replacements: res.replacements,
               totalLines: res.totalLines,
-              message: `Successfully edited ${filePath}`,
+              message: `Successfully edited ${cleanPath}`,
             })
           } catch (err: any) {
             return errorResult(
               "FILE_EDIT_FAILED",
               err.message || String(err),
-              "Ensure oldString matches exact remote content including whitespace, or set replaceAll to true."
+              "Ensure oldString matches remote content including whitespace, or set replaceAll to true."
             )
           }
         },
       })
 
-      // 12. ssh_scp
+      // 13. ssh_scp
       editor.add({
         name: "ssh_scp",
-        description: "Securely copy files or directories between local machine and remote host (upload/download), or directly between two remote SSH sessions.",
+        description: "Securely copy files or directories between local machine and remote host, or directly between two remote sessions.",
         input: {
           type: "object",
           properties: {
             direction: {
               type: "string",
               enum: ["upload", "download", "remote_to_remote"],
-              description: "Transfer direction: 'upload' (local -> remote), 'download' (remote -> local), or 'remote_to_remote' (session -> targetSession)",
+              description: "Transfer direction: 'upload', 'download', or 'remote_to_remote'",
             },
             sourcePath: {
               type: "string",
-              description: "Source path of file or directory (local path for upload; remote path for download/remote_to_remote)",
+              description: "Source path of file or directory",
             },
             destPath: {
               type: "string",
-              description: "Destination path of file or directory (remote path for upload/remote_to_remote; local path for download)",
+              description: "Destination path of file or directory",
             },
             recursive: {
               type: "boolean",
@@ -513,15 +567,15 @@ export default Plugin.define({
             },
             sessionID: {
               type: "string",
-              description: "Target session ID or profile (for upload/download), or source session (for remote_to_remote)",
+              description: "Session ID (source session if remote_to_remote)",
             },
             targetSessionID: {
               type: "string",
-              description: "Destination session ID or profile (required only when direction is 'remote_to_remote')",
+              description: "Destination session ID (for remote_to_remote)",
             },
             concurrency: {
               type: "number",
-              description: "Concurrent chunks for high throughput transfers (default: 4)",
+              description: "Concurrent chunk transfers (default: 4)",
             },
           },
           required: ["direction", "sourcePath", "destPath"],
@@ -531,13 +585,16 @@ export default Plugin.define({
         execute: async (input, context) => {
           const {
             direction,
-            sourcePath,
-            destPath,
+            sourcePath: rawSource,
+            destPath: rawDest,
             recursive = false,
             sessionID,
             targetSessionID,
             concurrency = 4,
           } = input as any
+
+          const sourcePath = typeof rawSource === "string" ? rawSource.trim() : rawSource
+          const destPath = typeof rawDest === "string" ? rawDest.trim() : rawDest
 
           const startTime = Date.now()
           const dirLower = String(direction).toLowerCase().trim()
@@ -582,9 +639,9 @@ export default Plugin.define({
                 )
               }
 
-              let session = sessionManager.getSession(sessionID)
+              let session = sessionManager.getSession(sessionID?.trim())
               if (!session || !session.isOpen()) {
-                session = await sessionManager.getOrCreateSession(sessionID)
+                session = await sessionManager.getOrCreateSession(sessionID?.trim())
               }
 
               await context.progress({
@@ -634,9 +691,9 @@ export default Plugin.define({
               dirLower === "remote_to_local" ||
               dirLower === "from_remote"
             ) {
-              let session = sessionManager.getSession(sessionID)
+              let session = sessionManager.getSession(sessionID?.trim())
               if (!session || !session.isOpen()) {
-                session = await sessionManager.getOrCreateSession(sessionID)
+                session = await sessionManager.getOrCreateSession(sessionID?.trim())
               }
 
               const remoteStat = await session.sftp.stat(sourcePath)
@@ -705,14 +762,14 @@ export default Plugin.define({
                 )
               }
 
-              let sourceSession = sessionManager.getSession(sessionID)
+              let sourceSession = sessionManager.getSession(sessionID?.trim())
               if (!sourceSession || !sourceSession.isOpen()) {
-                sourceSession = await sessionManager.getOrCreateSession(sessionID)
+                sourceSession = await sessionManager.getOrCreateSession(sessionID?.trim())
               }
 
-              let targetSession = sessionManager.getSession(targetSessionID)
+              let targetSession = sessionManager.getSession(targetSessionID?.trim())
               if (!targetSession || !targetSession.isOpen()) {
-                targetSession = await sessionManager.getOrCreateSession(targetSessionID)
+                targetSession = await sessionManager.getOrCreateSession(targetSessionID?.trim())
               }
 
               await context.progress({
@@ -752,35 +809,57 @@ export default Plugin.define({
         },
       })
 
-      // 13. ssh_list_dir
+      // 14. ssh_list_dir
       editor.add({
         name: "ssh_list_dir",
-        description: "List files and directories on the remote machine over SFTP with detailed file metadata (size, permissions, timestamps, type).",
+        description: "List remote directory contents with size, permissions, and timestamps.",
         input: {
           type: "object",
           properties: {
-            path: { type: "string", description: "Remote directory path to list (default: current/home directory '.')" },
-            showHidden: { type: "boolean", description: "Include hidden files/directories starting with '.' (default: true)" },
+            path: { type: "string", description: "Remote directory path to list (default: '.')" },
+            showHidden: { type: "boolean", description: "Include hidden files/directories (default: true)" },
             sort: {
               type: "string",
               enum: ["name", "size", "mtime"],
-              description: "Sort order: 'name' (default, directories first), 'size' (largest first), or 'mtime' (newest first)",
+              description: "Sort order: 'name', 'size', or 'mtime'",
             },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            details: {
+              type: "boolean",
+              description: "Include extended attributes like mode, uid, gid (default: false for token efficiency)",
+            },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           additionalProperties: false,
         },
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
-          const { path: dirPath, showHidden, sort, sessionID } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const { path: dirPath, showHidden, sort, details, sessionID } = input as any
+          const cleanPath = dirPath ? normalizePath(dirPath) : "."
+          let session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+            session = await sessionManager.getOrCreateSession(sessionID?.trim())
           }
 
-          await context.progress({ status: `Listing remote directory: ${dirPath || "."}...` })
+          await context.progress({ status: `Listing remote directory: ${cleanPath}...` })
           try {
-            const res = await session.sftp.listDir(dirPath || ".", showHidden ?? true, sort || "name")
+            const res = await session.sftp.listDir(cleanPath, showHidden ?? true, sort || "name")
+            if (!details) {
+              const compactEntries = res.entries.map((e) => ({
+                name: e.name,
+                type: e.type,
+                size: e.sizeFormatted,
+                permissions: e.permissions,
+                mtime: e.mtime,
+                ...(e.isSymbolicLink && (e as any).target ? { target: (e as any).target } : {}),
+              }))
+              return successResult({
+                path: res.path,
+                totalCount: res.totalCount,
+                directoriesCount: res.directoriesCount,
+                filesCount: res.filesCount,
+                entries: compactEntries,
+              })
+            }
             return successResult(res)
           } catch (err: any) {
             return errorResult(
@@ -792,15 +871,15 @@ export default Plugin.define({
         },
       })
 
-      // 14. ssh_stat
+      // 15. ssh_stat
       editor.add({
         name: "ssh_stat",
-        description: "Inspect attributes and metadata of a remote file, directory, or symlink over SFTP (size, permissions, timestamps, existence).",
+        description: "Inspect remote file, directory, or symlink attributes and existence.",
         input: {
           type: "object",
           properties: {
             path: { type: "string", description: "Remote file or directory path to inspect" },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           required: ["path"],
           additionalProperties: false,
@@ -808,14 +887,15 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const { path: filePath, sessionID } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const cleanPath = normalizePath(filePath)
+          let session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+            session = await sessionManager.getOrCreateSession(sessionID?.trim())
           }
 
-          await context.progress({ status: `Checking attributes for: ${filePath}...` })
+          await context.progress({ status: `Checking attributes: ${cleanPath}...` })
           try {
-            const res = await session.sftp.stat(filePath)
+            const res = await session.sftp.stat(cleanPath)
             return successResult(res)
           } catch (err: any) {
             return errorResult("STAT_FAILED", err.message || String(err))
@@ -823,19 +903,19 @@ export default Plugin.define({
         },
       })
 
-      // 15. ssh_mkdir
+      // 16. ssh_mkdir
       editor.add({
         name: "ssh_mkdir",
-        description: "Create a directory on the remote machine over SFTP with optional recursive creation of parent directories.",
+        description: "Create remote directory (mkdir -p by default).",
         input: {
           type: "object",
           properties: {
             path: { type: "string", description: "Remote directory path to create" },
             recursive: {
               type: "boolean",
-              description: "Create parent directories as needed, like mkdir -p (default: true)",
+              description: "Create parent directories as needed (default: true)",
             },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           required: ["path"],
           additionalProperties: false,
@@ -843,18 +923,19 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const { path: dirPath, recursive, sessionID } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const cleanPath = normalizePath(dirPath)
+          let session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+            session = await sessionManager.getOrCreateSession(sessionID?.trim())
           }
 
-          await context.progress({ status: `Creating remote directory: ${dirPath}...` })
+          await context.progress({ status: `Creating remote directory: ${cleanPath}...` })
           try {
-            await session.sftp.mkdir(dirPath, recursive ?? true)
+            await session.sftp.mkdir(cleanPath, recursive ?? true)
             return successResult({
-              path: dirPath,
+              path: cleanPath,
               created: true,
-              message: `Directory '${dirPath}' created successfully.`,
+              message: `Directory '${cleanPath}' created successfully.`,
             })
           } catch (err: any) {
             return errorResult(
@@ -866,19 +947,19 @@ export default Plugin.define({
         },
       })
 
-      // 16. ssh_rm
+      // 17. ssh_rm
       editor.add({
         name: "ssh_rm",
-        description: "Delete a file or directory on the remote machine over SFTP. Supports recursive removal for non-empty directories.",
+        description: "Delete a file or directory on the remote machine over SFTP.",
         input: {
           type: "object",
           properties: {
             path: { type: "string", description: "Remote file or directory path to delete" },
             recursive: {
               type: "boolean",
-              description: "Whether to recursively delete directories and all their contents (default: false)",
+              description: "Recursively delete directories and all their contents (default: false)",
             },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           required: ["path"],
           additionalProperties: false,
@@ -886,19 +967,20 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const { path: filePath, recursive, sessionID } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const cleanPath = normalizePath(filePath)
+          let session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+            session = await sessionManager.getOrCreateSession(sessionID?.trim())
           }
 
-          await context.progress({ status: `Deleting remote path: ${filePath}...` })
+          await context.progress({ status: `Deleting remote path: ${cleanPath}...` })
           try {
-            const res = await session.sftp.rm(filePath, recursive ?? false)
+            const res = await session.sftp.rm(cleanPath, recursive ?? false)
             return successResult({
-              path: filePath,
+              path: cleanPath,
               deleted: true,
               isDirectory: res.isDirectory,
-              message: `Successfully removed ${res.isDirectory ? "directory" : "file"}: ${filePath}`,
+              message: `Successfully removed ${res.isDirectory ? "directory" : "file"}: ${cleanPath}`,
             })
           } catch (err: any) {
             return errorResult(
@@ -910,7 +992,7 @@ export default Plugin.define({
         },
       })
 
-      // 17. ssh_rename
+      // 18. ssh_rename
       editor.add({
         name: "ssh_rename",
         description: "Move or rename a file or directory on the remote machine over SFTP.",
@@ -919,7 +1001,7 @@ export default Plugin.define({
           properties: {
             oldPath: { type: "string", description: "Current remote file or directory path" },
             newPath: { type: "string", description: "Destination remote file or directory path" },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           required: ["oldPath", "newPath"],
           additionalProperties: false,
@@ -927,19 +1009,21 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const { oldPath, newPath, sessionID } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const cleanOld = normalizePath(oldPath)
+          const cleanNew = normalizePath(newPath)
+          let session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+            session = await sessionManager.getOrCreateSession(sessionID?.trim())
           }
 
-          await context.progress({ status: `Renaming '${oldPath}' to '${newPath}'...` })
+          await context.progress({ status: `Renaming '${cleanOld}' to '${cleanNew}'...` })
           try {
-            await session.sftp.rename(oldPath, newPath)
+            await session.sftp.rename(cleanOld, cleanNew)
             return successResult({
-              oldPath,
-              newPath,
+              oldPath: cleanOld,
+              newPath: cleanNew,
               renamed: true,
-              message: `Successfully moved/renamed '${oldPath}' to '${newPath}'.`,
+              message: `Successfully moved/renamed '${cleanOld}' to '${cleanNew}'.`,
             })
           } catch (err: any) {
             return errorResult(
@@ -951,16 +1035,16 @@ export default Plugin.define({
         },
       })
 
-      // 18. ssh_chmod
+      // 19. ssh_chmod
       editor.add({
         name: "ssh_chmod",
-        description: "Change permissions/mode of a remote file or directory over SFTP (e.g. '0755', '0644', '0600').",
+        description: "Change permissions/mode of a remote file or directory over SFTP (e.g. '0755', '0644').",
         input: {
           type: "object",
           properties: {
             path: { type: "string", description: "Remote file or directory path" },
-            mode: { type: "string", description: "Octal permissions string (e.g. '755', '0755', '644', '600')" },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            mode: { type: "string", description: "Octal permissions string (e.g. '755', '0755', '644')" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           required: ["path", "mode"],
           additionalProperties: false,
@@ -968,18 +1052,20 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const { path: filePath, mode, sessionID } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const cleanPath = normalizePath(filePath)
+          const cleanMode = typeof mode === "string" ? mode.trim() : mode
+          let session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+            session = await sessionManager.getOrCreateSession(sessionID?.trim())
           }
 
-          await context.progress({ status: `Setting mode ${mode} on: ${filePath}...` })
+          await context.progress({ status: `Setting mode ${cleanMode} on: ${cleanPath}...` })
           try {
-            const appliedMode = await session.sftp.chmod(filePath, mode)
+            const appliedMode = await session.sftp.chmod(cleanPath, cleanMode)
             return successResult({
-              path: filePath,
+              path: cleanPath,
               mode: appliedMode,
-              message: `Successfully changed permissions of '${filePath}' to ${appliedMode}.`,
+              message: `Successfully changed permissions of '${cleanPath}' to ${appliedMode}.`,
             })
           } catch (err: any) {
             return errorResult("CHMOD_FAILED", err.message || String(err))
@@ -989,23 +1075,23 @@ export default Plugin.define({
 
       // === Background Jobs & System Inspection ===
 
-      // 19. ssh_system_inspect
+      // 20. ssh_system_inspect
       editor.add({
         name: "ssh_system_inspect",
-        description: "Comprehensive remote system health and environment inspect in a single call (OS, CPU, RAM, Disk, package managers, runtimes, listening ports, git status).",
+        description: "Probe remote system: OS, CPU, RAM, disk, runtimes, listening ports, git status.",
         input: {
           type: "object",
           properties: {
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           additionalProperties: false,
         },
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const { sessionID } = input as any
-          let session = sessionManager.getSession(sessionID)
+          let session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+            session = await sessionManager.getOrCreateSession(sessionID?.trim())
           }
 
           await context.progress({ status: `Inspecting remote system on ${session.host}...` })
@@ -1019,15 +1105,15 @@ export default Plugin.define({
         },
       })
 
-      // 20. ssh_job_spawn
+      // 21. ssh_job_spawn
       editor.add({
         name: "ssh_job_spawn",
-        description: "Spawn a detached, supervised long-running background command on the remote machine. Returns immediately with a job ID.",
+        description: "Spawn a detached, supervised background command on the remote machine.",
         input: {
           type: "object",
           properties: {
-            command: { type: "string", description: "Long running command to execute in background" },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            command: { type: "string", description: "Command to execute in background" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           required: ["command"],
           additionalProperties: false,
@@ -1035,14 +1121,19 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const { command, sessionID } = input as any
-          let session = sessionManager.getSession(sessionID)
-          if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+          const normCmd = normalizeCommand(command)
+          if (!normCmd) {
+            return errorResult("EMPTY_COMMAND", "Command cannot be empty or whitespace only.")
           }
 
-          await context.progress({ status: `Spawning background job: ${command.slice(0, 30)}...` })
+          let session = sessionManager.getSession(sessionID?.trim())
+          if (!session || !session.isOpen()) {
+            session = await sessionManager.getOrCreateSession(sessionID?.trim())
+          }
+
+          await context.progress({ status: `Spawning background job: ${normCmd.slice(0, 30)}...` })
           try {
-            const job = await session.jobs.spawnJob(command)
+            const job = await session.jobs.spawnJob(normCmd)
             return successResult({ job, message: `Job ${job.id} started in background.` })
           } catch (err: any) {
             return errorResult("JOB_SPAWN_FAILED", err.message || String(err))
@@ -1050,15 +1141,15 @@ export default Plugin.define({
         },
       })
 
-      // 21. ssh_job_status
+      // 22. ssh_job_status
       editor.add({
         name: "ssh_job_status",
-        description: "Check status, exit code, and liveness of a background job spawned via ssh_job_spawn.",
+        description: "Check status and exit code of a background job.",
         input: {
           type: "object",
           properties: {
             jobID: { type: "string", description: "The job identifier" },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           required: ["jobID"],
           additionalProperties: false,
@@ -1066,13 +1157,14 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input) => {
           const { jobID, sessionID } = input as any
-          const session = sessionManager.getSession(sessionID)
+          const cleanJobId = typeof jobID === "string" ? jobID.trim() : jobID
+          const session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
             return errorResult("SESSION_NOT_OPEN", `Session '${sessionID || "default"}' is not open.`)
           }
 
           try {
-            const status = await session.jobs.getJobStatus(jobID)
+            const status = await session.jobs.getJobStatus(cleanJobId)
             return successResult({ job: status })
           } catch (err: any) {
             return errorResult("JOB_STATUS_FAILED", err.message || String(err))
@@ -1080,16 +1172,16 @@ export default Plugin.define({
         },
       })
 
-      // 22. ssh_job_logs
+      // 23. ssh_job_logs
       editor.add({
         name: "ssh_job_logs",
-        description: "Retrieve latest stdout/stderr logs from a background job spawned via ssh_job_spawn.",
+        description: "Retrieve stdout/stderr logs from a background job.",
         input: {
           type: "object",
           properties: {
             jobID: { type: "string", description: "The job identifier" },
             lines: { type: "number", description: "Number of tail lines to retrieve (default: 100)" },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           required: ["jobID"],
           additionalProperties: false,
@@ -1097,17 +1189,20 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input) => {
           const { jobID, lines, sessionID } = input as any
-          const session = sessionManager.getSession(sessionID)
+          const cleanJobId = typeof jobID === "string" ? jobID.trim() : jobID
+          const session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
             return errorResult("SESSION_NOT_OPEN", `Session '${sessionID || "default"}' is not open.`)
           }
 
           try {
-            const res = await session.jobs.getJobLogs(jobID, lines || 100)
+            const res = await session.jobs.getJobLogs(cleanJobId, lines || 100)
+            const trunc = truncateOutput(res.logs)
             return successResult({
-              jobID,
+              jobID: cleanJobId,
               isRunning: res.isRunning,
-              logs: res.logs,
+              logs: trunc.text,
+              ...(trunc.truncated ? { logsTruncated: true } : {}),
             })
           } catch (err: any) {
             return errorResult("JOB_LOGS_FAILED", err.message || String(err))
@@ -1115,10 +1210,10 @@ export default Plugin.define({
         },
       })
 
-      // 23. ssh_job_kill
+      // 24. ssh_job_kill
       editor.add({
         name: "ssh_job_kill",
-        description: "Terminate a remote background job with SIGTERM, SIGINT, or SIGKILL.",
+        description: "Terminate a background job with SIGTERM, SIGINT, or SIGKILL.",
         input: {
           type: "object",
           properties: {
@@ -1128,7 +1223,7 @@ export default Plugin.define({
               enum: ["SIGINT", "SIGTERM", "SIGKILL"],
               description: "Signal to send (default: SIGTERM)",
             },
-            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+            sessionID: { type: "string", description: "Session ID or profile name (optional)" },
           },
           required: ["jobID"],
           additionalProperties: false,
@@ -1136,15 +1231,16 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input) => {
           const { jobID, signal, sessionID } = input as any
-          const session = sessionManager.getSession(sessionID)
+          const cleanJobId = typeof jobID === "string" ? jobID.trim() : jobID
+          const session = sessionManager.getSession(sessionID?.trim())
           if (!session || !session.isOpen()) {
             return errorResult("SESSION_NOT_OPEN", `Session '${sessionID || "default"}' is not open.`)
           }
 
           try {
-            const killed = await session.jobs.killJob(jobID, signal || "SIGTERM")
+            const killed = await session.jobs.killJob(cleanJobId, signal || "SIGTERM")
             return successResult({
-              jobID,
+              jobID: cleanJobId,
               killed,
               message: killed ? `Job was terminated with ${signal || "SIGTERM"}.` : "Could not terminate job.",
             })
@@ -1156,14 +1252,14 @@ export default Plugin.define({
 
       // === Multi-Session & Cluster Management ===
 
-      // 24. ssh_switch_session
+      // 25. ssh_switch_session
       editor.add({
         name: "ssh_switch_session",
         description: "Switch the active/default SSH session so subsequent commands default to this host.",
         input: {
           type: "object",
           properties: {
-            sessionID: { type: "string", description: "The session ID or profile to make active default" },
+            sessionID: { type: "string", description: "Session ID or profile name to make active default" },
           },
           required: ["sessionID"],
           additionalProperties: false,
@@ -1171,12 +1267,13 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input) => {
           const { sessionID } = input as any
-          let session = sessionManager.getSession(sessionID)
+          const cleanId = typeof sessionID === "string" ? sessionID.trim() : sessionID
+          let session = sessionManager.getSession(cleanId)
           if (!session || !session.isOpen()) {
-            session = await sessionManager.getOrCreateSession(sessionID)
+            session = await sessionManager.getOrCreateSession(cleanId)
           }
 
-          const switched = sessionManager.setDefaultSession(session.id)
+          sessionManager.setDefaultSession(session.id)
           return successResult({
             activeSession: session.id,
             host: session.host,
@@ -1185,10 +1282,10 @@ export default Plugin.define({
         },
       })
 
-      // 25. ssh_broadcast
+      // 26. ssh_broadcast
       editor.add({
         name: "ssh_broadcast",
-        description: "Execute a shell command concurrently across multiple or all connected SSH sessions (cluster diagnostics, rolling updates).",
+        description: "Execute a command concurrently across multiple or all connected SSH sessions.",
         input: {
           type: "object",
           properties: {
@@ -1196,7 +1293,7 @@ export default Plugin.define({
             targets: {
               type: "array",
               items: { type: "string" },
-              description: "Array of session IDs or profile names. If omitted or empty, broadcasts to all open sessions.",
+              description: "Array of session IDs or profiles (omitted = all open sessions)",
             },
             timeoutMs: { type: "number", description: "Timeout per host in ms (default: 60000)" },
           },
@@ -1206,6 +1303,11 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input, context) => {
           const { command, targets, timeoutMs } = input as any
+          const normCmd = normalizeCommand(command)
+          if (!normCmd) {
+            return errorResult("EMPTY_COMMAND", "Command cannot be empty or whitespace only.")
+          }
+
           await context.progress({ status: `Broadcasting command to target sessions...` })
 
           try {
@@ -1213,7 +1315,7 @@ export default Plugin.define({
             const res = await broadcastCommand(
               sessionManager,
               Array.isArray(targets) && targets.length > 0 ? targets : "all",
-              command,
+              normCmd,
               timeoutMs || 60000
             )
             return successResult(res)
@@ -1223,7 +1325,7 @@ export default Plugin.define({
         },
       })
 
-      // 26. ssh_close
+      // 27. ssh_close
       editor.add({
         name: "ssh_close",
         description: "Disconnect and close an active SSH session, freeing remote resources.",
@@ -1238,11 +1340,12 @@ export default Plugin.define({
         options: { namespace: "ssh", codemode: true },
         execute: async (input) => {
           const { sessionID } = input as any
-          const closed = await sessionManager.closeSession(sessionID)
+          const cleanId = typeof sessionID === "string" ? sessionID.trim() : sessionID
+          const closed = await sessionManager.closeSession(cleanId)
           return successResult({
-            sessionID,
+            sessionID: cleanId,
             closed,
-            message: closed ? `Session '${sessionID}' closed.` : `Session was not found or already closed.`,
+            message: closed ? `Session '${cleanId}' closed.` : `Session was not found or already closed.`,
           })
         },
       })

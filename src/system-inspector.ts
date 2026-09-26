@@ -122,6 +122,8 @@ pwd
   for (const line of dfLines) {
     const parts = line.trim().split(/\s+/)
     if (parts.length >= 6) {
+      // Exclude virtual snap loop mounts to save agent input tokens
+      if (parts[0].startsWith("/dev/loop") || parts[0] === "none") continue
       diskList.push({
         filesystem: parts[0],
         size: parts[1],
