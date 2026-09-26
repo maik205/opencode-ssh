@@ -39,7 +39,8 @@ export function resolveLocalPath(inputPath: string): string {
     return os.homedir()
   }
   if (raw.startsWith("~/") || raw.startsWith("~\\")) {
-    return path.join(os.homedir(), raw.slice(2))
+    const rel = raw.slice(2).replace(/[\\/]/g, path.sep)
+    return path.join(os.homedir(), rel)
   }
   return path.resolve(process.cwd(), raw)
 }

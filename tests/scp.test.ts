@@ -26,7 +26,7 @@ describe("SCP & File Transfer Utilities", () => {
   describe("resolveLocalPath", () => {
     it("expands ~ to user home directory", () => {
       expect(resolveLocalPath("~")).toBe(os.homedir())
-      expect(resolveLocalPath("~/foo/bar.txt")).toBe(path.join(os.homedir(), "foo/bar.txt"))
+      expect(resolveLocalPath("~/foo/bar.txt")).toBe(path.join(os.homedir(), "foo", "bar.txt"))
       expect(resolveLocalPath("~\\foo\\bar.txt")).toBe(path.join(os.homedir(), "foo", "bar.txt"))
     })
 
