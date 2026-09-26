@@ -41,7 +41,7 @@ describe("TUI plugin registration", () => {
     // Must NOT return a bare string, which causes OpenTUI:
     // "Orphan text error: ... must have a <text> as a parent"
     expect(typeof renderResult).not.toBe("string")
-    expect(renderResult).toBeUndefined()
+    expect(renderResult).toBeNull()
 
     // Verify keymap registration
     expect(mockContext.keymap.layer).toHaveBeenCalledTimes(1)

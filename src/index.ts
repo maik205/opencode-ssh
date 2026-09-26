@@ -1,7 +1,9 @@
+import path from "node:path"
 import { Plugin } from "@opencode/plugin"
 import { SessionManager } from "./session-manager.js"
 import { ConfigManager } from "./config.js"
 import { errorResult, successResult } from "./agent-response.js"
+import { formatBytes } from "./sftp-manager.js"
 
 export default Plugin.define({
   id: "opencode-ssh",
@@ -485,9 +487,509 @@ export default Plugin.define({
         },
       })
 
+      // 12. ssh_scp
+      editor.add({
+        name: "ssh_scp",
+        description: "Securely copy files or directories between local machine and remote host (upload/download), or directly between two remote SSH sessions.",
+        input: {
+          type: "object",
+          properties: {
+            direction: {
+              type: "string",
+              enum: ["upload", "download", "remote_to_remote"],
+              description: "Transfer direction: 'upload' (local -> remote), 'download' (remote -> local), or 'remote_to_remote' (session -> targetSession)",
+            },
+            sourcePath: {
+              type: "string",
+              description: "Source path of file or directory (local path for upload; remote path for download/remote_to_remote)",
+            },
+            destPath: {
+              type: "string",
+              description: "Destination path of file or directory (remote path for upload/remote_to_remote; local path for download)",
+            },
+            recursive: {
+              type: "boolean",
+              description: "Transfer directories recursively (default: false)",
+            },
+            sessionID: {
+              type: "string",
+              description: "Target session ID or profile (for upload/download), or source session (for remote_to_remote)",
+            },
+            targetSessionID: {
+              type: "string",
+              description: "Destination session ID or profile (required only when direction is 'remote_to_remote')",
+            },
+            concurrency: {
+              type: "number",
+              description: "Concurrent chunks for high throughput transfers (default: 4)",
+            },
+          },
+          required: ["direction", "sourcePath", "destPath"],
+          additionalProperties: false,
+        },
+        options: { namespace: "ssh", codemode: true },
+        execute: async (input, context) => {
+          const {
+            direction,
+            sourcePath,
+            destPath,
+            recursive = false,
+            sessionID,
+            targetSessionID,
+            concurrency = 4,
+          } = input as any
+
+          const startTime = Date.now()
+          const dirLower = String(direction).toLowerCase().trim()
+
+          // Progress throttling
+          let lastProgressUpdate = 0
+          const onProgress = (file: string, transferredBytes: number, totalBytes?: number) => {
+            const now = Date.now()
+            if (now - lastProgressUpdate > 500) {
+              lastProgressUpdate = now
+              const pct =
+                totalBytes && totalBytes > 0
+                  ? ` (${Math.round((transferredBytes / totalBytes) * 100)}%)`
+                  : ""
+              context
+                .progress({
+                  status: `[SCP] Transferring ${file}: ${formatBytes(transferredBytes)}${
+                    totalBytes ? ` / ${formatBytes(totalBytes)}` : ""
+                  }${pct}`,
+                })
+                .catch(() => {})
+            }
+          }
+
+          try {
+            if (dirLower === "upload" || dirLower === "local_to_remote" || dirLower === "to_remote") {
+              const { resolveLocalPath } = await import("./sftp-manager.js")
+              const resolvedLocal = resolveLocalPath(sourcePath)
+              const fs = await import("node:fs")
+
+              if (!fs.existsSync(resolvedLocal)) {
+                return errorResult("SCP_UPLOAD_FAILED", `Local path '${sourcePath}' does not exist.`)
+              }
+
+              const localStat = fs.statSync(resolvedLocal)
+              const isDir = localStat.isDirectory()
+
+              if (isDir && !recursive) {
+                return errorResult(
+                  "SCP_DIRECTORY_REQUIRES_RECURSIVE",
+                  `Local path '${sourcePath}' is a directory. Set recursive: true to transfer directories.`
+                )
+              }
+
+              let session = sessionManager.getSession(sessionID)
+              if (!session || !session.isOpen()) {
+                session = await sessionManager.getOrCreateSession(sessionID)
+              }
+
+              await context.progress({
+                status: `[SCP] Uploading ${sourcePath} to ${session.host}:${destPath}...`,
+              })
+
+              if (isDir) {
+                const res = await session.sftp.uploadDir(sourcePath, destPath, {
+                  concurrency,
+                  onProgress,
+                })
+                return successResult({
+                  direction: "upload",
+                  sourcePath,
+                  destPath,
+                  isDirectory: true,
+                  filesCount: res.filesCount,
+                  directoriesCount: res.directoriesCount,
+                  totalBytes: res.totalBytes,
+                  sizeFormatted: formatBytes(res.totalBytes),
+                  durationMs: Date.now() - startTime,
+                  message: `Successfully uploaded directory '${sourcePath}' (${res.filesCount} files, ${formatBytes(
+                    res.totalBytes
+                  )}) to '${destPath}'.`,
+                })
+              } else {
+                const res = await session.sftp.fastPut(sourcePath, destPath, {
+                  concurrency,
+                  onProgress: (transferred, total) =>
+                    onProgress(path.basename(sourcePath), transferred, total),
+                })
+                return successResult({
+                  direction: "upload",
+                  sourcePath,
+                  destPath: res.remotePath,
+                  isDirectory: false,
+                  filesCount: 1,
+                  directoriesCount: 0,
+                  totalBytes: res.bytes,
+                  sizeFormatted: formatBytes(res.bytes),
+                  durationMs: Date.now() - startTime,
+                  message: `Successfully uploaded '${sourcePath}' (${formatBytes(res.bytes)}) to '${res.remotePath}'.`,
+                })
+              }
+            } else if (
+              dirLower === "download" ||
+              dirLower === "remote_to_local" ||
+              dirLower === "from_remote"
+            ) {
+              let session = sessionManager.getSession(sessionID)
+              if (!session || !session.isOpen()) {
+                session = await sessionManager.getOrCreateSession(sessionID)
+              }
+
+              const remoteStat = await session.sftp.stat(sourcePath)
+              if (!remoteStat.exists) {
+                return errorResult(
+                  "SCP_DOWNLOAD_FAILED",
+                  `Remote path '${sourcePath}' does not exist on ${session.host}.`
+                )
+              }
+
+              const isDir = remoteStat.isDirectory ?? false
+              if (isDir && !recursive) {
+                return errorResult(
+                  "SCP_DIRECTORY_REQUIRES_RECURSIVE",
+                  `Remote path '${sourcePath}' is a directory. Set recursive: true to transfer directories.`
+                )
+              }
+
+              await context.progress({
+                status: `[SCP] Downloading ${session.host}:${sourcePath} to ${destPath}...`,
+              })
+
+              if (isDir) {
+                const res = await session.sftp.downloadDir(sourcePath, destPath, {
+                  concurrency,
+                  onProgress,
+                })
+                return successResult({
+                  direction: "download",
+                  sourcePath,
+                  destPath,
+                  isDirectory: true,
+                  filesCount: res.filesCount,
+                  directoriesCount: res.directoriesCount,
+                  totalBytes: res.totalBytes,
+                  sizeFormatted: formatBytes(res.totalBytes),
+                  durationMs: Date.now() - startTime,
+                  message: `Successfully downloaded directory '${sourcePath}' (${res.filesCount} files, ${formatBytes(
+                    res.totalBytes
+                  )}) to '${destPath}'.`,
+                })
+              } else {
+                const res = await session.sftp.fastGet(sourcePath, destPath, {
+                  concurrency,
+                  onProgress: (transferred, total) =>
+                    onProgress(path.posix.basename(sourcePath), transferred, total),
+                })
+                return successResult({
+                  direction: "download",
+                  sourcePath,
+                  destPath: res.localPath,
+                  isDirectory: false,
+                  filesCount: 1,
+                  directoriesCount: 0,
+                  totalBytes: res.bytes,
+                  sizeFormatted: formatBytes(res.bytes),
+                  durationMs: Date.now() - startTime,
+                  message: `Successfully downloaded '${sourcePath}' (${formatBytes(res.bytes)}) to '${res.localPath}'.`,
+                })
+              }
+            } else if (dirLower === "remote_to_remote") {
+              if (!targetSessionID) {
+                return errorResult(
+                  "MISSING_TARGET_SESSION",
+                  "targetSessionID is required when direction is 'remote_to_remote'."
+                )
+              }
+
+              let sourceSession = sessionManager.getSession(sessionID)
+              if (!sourceSession || !sourceSession.isOpen()) {
+                sourceSession = await sessionManager.getOrCreateSession(sessionID)
+              }
+
+              let targetSession = sessionManager.getSession(targetSessionID)
+              if (!targetSession || !targetSession.isOpen()) {
+                targetSession = await sessionManager.getOrCreateSession(targetSessionID)
+              }
+
+              await context.progress({
+                status: `[SCP] Streaming ${sourceSession.host}:${sourcePath} to ${targetSession.host}:${destPath}...`,
+              })
+
+              const res = await sourceSession.sftp.copyToRemote(sourcePath, targetSession.sftp, destPath, {
+                recursive,
+                onProgress: (file, transferred) => onProgress(file, transferred),
+              })
+
+              return successResult({
+                direction: "remote_to_remote",
+                sourceSession: sourceSession.id,
+                targetSession: targetSession.id,
+                sourcePath,
+                destPath,
+                isDirectory: res.isDirectory,
+                filesCount: res.filesCount,
+                directoriesCount: res.directoriesCount,
+                totalBytes: res.totalBytes,
+                sizeFormatted: formatBytes(res.totalBytes),
+                durationMs: Date.now() - startTime,
+                message: `Successfully transferred ${res.isDirectory ? "directory" : "file"} from '${
+                  sourceSession.id
+                }:${sourcePath}' to '${targetSession.id}:${destPath}' (${formatBytes(res.totalBytes)}).`,
+              })
+            } else {
+              return errorResult(
+                "INVALID_DIRECTION",
+                `Invalid transfer direction '${direction}'. Allowed values: 'upload', 'download', 'remote_to_remote'.`
+              )
+            }
+          } catch (err: any) {
+            return errorResult("SCP_FAILED", err.message || String(err))
+          }
+        },
+      })
+
+      // 13. ssh_list_dir
+      editor.add({
+        name: "ssh_list_dir",
+        description: "List files and directories on the remote machine over SFTP with detailed file metadata (size, permissions, timestamps, type).",
+        input: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Remote directory path to list (default: current/home directory '.')" },
+            showHidden: { type: "boolean", description: "Include hidden files/directories starting with '.' (default: true)" },
+            sort: {
+              type: "string",
+              enum: ["name", "size", "mtime"],
+              description: "Sort order: 'name' (default, directories first), 'size' (largest first), or 'mtime' (newest first)",
+            },
+            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+          },
+          additionalProperties: false,
+        },
+        options: { namespace: "ssh", codemode: true },
+        execute: async (input, context) => {
+          const { path: dirPath, showHidden, sort, sessionID } = input as any
+          let session = sessionManager.getSession(sessionID)
+          if (!session || !session.isOpen()) {
+            session = await sessionManager.getOrCreateSession(sessionID)
+          }
+
+          await context.progress({ status: `Listing remote directory: ${dirPath || "."}...` })
+          try {
+            const res = await session.sftp.listDir(dirPath || ".", showHidden ?? true, sort || "name")
+            return successResult(res)
+          } catch (err: any) {
+            return errorResult(
+              "LIST_DIR_FAILED",
+              err.message || String(err),
+              "Verify the directory path exists and the remote user has read permissions."
+            )
+          }
+        },
+      })
+
+      // 14. ssh_stat
+      editor.add({
+        name: "ssh_stat",
+        description: "Inspect attributes and metadata of a remote file, directory, or symlink over SFTP (size, permissions, timestamps, existence).",
+        input: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Remote file or directory path to inspect" },
+            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+          },
+          required: ["path"],
+          additionalProperties: false,
+        },
+        options: { namespace: "ssh", codemode: true },
+        execute: async (input, context) => {
+          const { path: filePath, sessionID } = input as any
+          let session = sessionManager.getSession(sessionID)
+          if (!session || !session.isOpen()) {
+            session = await sessionManager.getOrCreateSession(sessionID)
+          }
+
+          await context.progress({ status: `Checking attributes for: ${filePath}...` })
+          try {
+            const res = await session.sftp.stat(filePath)
+            return successResult(res)
+          } catch (err: any) {
+            return errorResult("STAT_FAILED", err.message || String(err))
+          }
+        },
+      })
+
+      // 15. ssh_mkdir
+      editor.add({
+        name: "ssh_mkdir",
+        description: "Create a directory on the remote machine over SFTP with optional recursive creation of parent directories.",
+        input: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Remote directory path to create" },
+            recursive: {
+              type: "boolean",
+              description: "Create parent directories as needed, like mkdir -p (default: true)",
+            },
+            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+          },
+          required: ["path"],
+          additionalProperties: false,
+        },
+        options: { namespace: "ssh", codemode: true },
+        execute: async (input, context) => {
+          const { path: dirPath, recursive, sessionID } = input as any
+          let session = sessionManager.getSession(sessionID)
+          if (!session || !session.isOpen()) {
+            session = await sessionManager.getOrCreateSession(sessionID)
+          }
+
+          await context.progress({ status: `Creating remote directory: ${dirPath}...` })
+          try {
+            await session.sftp.mkdir(dirPath, recursive ?? true)
+            return successResult({
+              path: dirPath,
+              created: true,
+              message: `Directory '${dirPath}' created successfully.`,
+            })
+          } catch (err: any) {
+            return errorResult(
+              "MKDIR_FAILED",
+              err.message || String(err),
+              "Ensure parent directory exists or set recursive to true."
+            )
+          }
+        },
+      })
+
+      // 16. ssh_rm
+      editor.add({
+        name: "ssh_rm",
+        description: "Delete a file or directory on the remote machine over SFTP. Supports recursive removal for non-empty directories.",
+        input: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Remote file or directory path to delete" },
+            recursive: {
+              type: "boolean",
+              description: "Whether to recursively delete directories and all their contents (default: false)",
+            },
+            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+          },
+          required: ["path"],
+          additionalProperties: false,
+        },
+        options: { namespace: "ssh", codemode: true },
+        execute: async (input, context) => {
+          const { path: filePath, recursive, sessionID } = input as any
+          let session = sessionManager.getSession(sessionID)
+          if (!session || !session.isOpen()) {
+            session = await sessionManager.getOrCreateSession(sessionID)
+          }
+
+          await context.progress({ status: `Deleting remote path: ${filePath}...` })
+          try {
+            const res = await session.sftp.rm(filePath, recursive ?? false)
+            return successResult({
+              path: filePath,
+              deleted: true,
+              isDirectory: res.isDirectory,
+              message: `Successfully removed ${res.isDirectory ? "directory" : "file"}: ${filePath}`,
+            })
+          } catch (err: any) {
+            return errorResult(
+              "RM_FAILED",
+              err.message || String(err),
+              "If deleting a non-empty directory, set recursive: true."
+            )
+          }
+        },
+      })
+
+      // 17. ssh_rename
+      editor.add({
+        name: "ssh_rename",
+        description: "Move or rename a file or directory on the remote machine over SFTP.",
+        input: {
+          type: "object",
+          properties: {
+            oldPath: { type: "string", description: "Current remote file or directory path" },
+            newPath: { type: "string", description: "Destination remote file or directory path" },
+            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+          },
+          required: ["oldPath", "newPath"],
+          additionalProperties: false,
+        },
+        options: { namespace: "ssh", codemode: true },
+        execute: async (input, context) => {
+          const { oldPath, newPath, sessionID } = input as any
+          let session = sessionManager.getSession(sessionID)
+          if (!session || !session.isOpen()) {
+            session = await sessionManager.getOrCreateSession(sessionID)
+          }
+
+          await context.progress({ status: `Renaming '${oldPath}' to '${newPath}'...` })
+          try {
+            await session.sftp.rename(oldPath, newPath)
+            return successResult({
+              oldPath,
+              newPath,
+              renamed: true,
+              message: `Successfully moved/renamed '${oldPath}' to '${newPath}'.`,
+            })
+          } catch (err: any) {
+            return errorResult(
+              "RENAME_FAILED",
+              err.message || String(err),
+              "Ensure destination directory exists and remote user has write permissions."
+            )
+          }
+        },
+      })
+
+      // 18. ssh_chmod
+      editor.add({
+        name: "ssh_chmod",
+        description: "Change permissions/mode of a remote file or directory over SFTP (e.g. '0755', '0644', '0600').",
+        input: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Remote file or directory path" },
+            mode: { type: "string", description: "Octal permissions string (e.g. '755', '0755', '644', '600')" },
+            sessionID: { type: "string", description: "Target session ID or profile (optional)" },
+          },
+          required: ["path", "mode"],
+          additionalProperties: false,
+        },
+        options: { namespace: "ssh", codemode: true },
+        execute: async (input, context) => {
+          const { path: filePath, mode, sessionID } = input as any
+          let session = sessionManager.getSession(sessionID)
+          if (!session || !session.isOpen()) {
+            session = await sessionManager.getOrCreateSession(sessionID)
+          }
+
+          await context.progress({ status: `Setting mode ${mode} on: ${filePath}...` })
+          try {
+            const appliedMode = await session.sftp.chmod(filePath, mode)
+            return successResult({
+              path: filePath,
+              mode: appliedMode,
+              message: `Successfully changed permissions of '${filePath}' to ${appliedMode}.`,
+            })
+          } catch (err: any) {
+            return errorResult("CHMOD_FAILED", err.message || String(err))
+          }
+        },
+      })
+
       // === Background Jobs & System Inspection ===
 
-      // 12. ssh_system_inspect
+      // 19. ssh_system_inspect
       editor.add({
         name: "ssh_system_inspect",
         description: "Comprehensive remote system health and environment inspect in a single call (OS, CPU, RAM, Disk, package managers, runtimes, listening ports, git status).",
@@ -517,7 +1019,7 @@ export default Plugin.define({
         },
       })
 
-      // 13. ssh_job_spawn
+      // 20. ssh_job_spawn
       editor.add({
         name: "ssh_job_spawn",
         description: "Spawn a detached, supervised long-running background command on the remote machine. Returns immediately with a job ID.",
@@ -548,7 +1050,7 @@ export default Plugin.define({
         },
       })
 
-      // 14. ssh_job_status
+      // 21. ssh_job_status
       editor.add({
         name: "ssh_job_status",
         description: "Check status, exit code, and liveness of a background job spawned via ssh_job_spawn.",
@@ -578,7 +1080,7 @@ export default Plugin.define({
         },
       })
 
-      // 15. ssh_job_logs
+      // 22. ssh_job_logs
       editor.add({
         name: "ssh_job_logs",
         description: "Retrieve latest stdout/stderr logs from a background job spawned via ssh_job_spawn.",
@@ -613,7 +1115,7 @@ export default Plugin.define({
         },
       })
 
-      // 16. ssh_job_kill
+      // 23. ssh_job_kill
       editor.add({
         name: "ssh_job_kill",
         description: "Terminate a remote background job with SIGTERM, SIGINT, or SIGKILL.",
@@ -654,7 +1156,7 @@ export default Plugin.define({
 
       // === Multi-Session & Cluster Management ===
 
-      // 17. ssh_switch_session
+      // 24. ssh_switch_session
       editor.add({
         name: "ssh_switch_session",
         description: "Switch the active/default SSH session so subsequent commands default to this host.",
@@ -683,7 +1185,7 @@ export default Plugin.define({
         },
       })
 
-      // 18. ssh_broadcast
+      // 25. ssh_broadcast
       editor.add({
         name: "ssh_broadcast",
         description: "Execute a shell command concurrently across multiple or all connected SSH sessions (cluster diagnostics, rolling updates).",
@@ -721,7 +1223,7 @@ export default Plugin.define({
         },
       })
 
-      // 19. ssh_close
+      // 26. ssh_close
       editor.add({
         name: "ssh_close",
         description: "Disconnect and close an active SSH session, freeing remote resources.",

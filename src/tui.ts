@@ -63,6 +63,7 @@ export default Plugin.define({
           ],
           bindings: ["ssh.profiles.show"],
         }))
+        return null
       },
     })
   },

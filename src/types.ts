@@ -42,3 +42,63 @@ export interface InteractiveSessionInfo {
     running: boolean
   }
 }
+
+export interface SFTPFileEntry {
+  name: string
+  path: string
+  type: "file" | "directory" | "symlink" | "other"
+  size: number
+  sizeFormatted: string
+  permissions: string
+  mode: string
+  mtime: string
+  mtimeMs: number
+  atime: string
+  atimeMs: number
+  uid: number
+  gid: number
+  isDirectory: boolean
+  isSymbolicLink: boolean
+}
+
+export interface SFTPStatResult {
+  path: string
+  exists: boolean
+  type?: "file" | "directory" | "symlink" | "other"
+  size?: number
+  sizeFormatted?: string
+  permissions?: string
+  mode?: string
+  mtime?: string
+  mtimeMs?: number
+  atime?: string
+  atimeMs?: number
+  uid?: number
+  gid?: number
+  isDirectory?: boolean
+  isFile?: boolean
+  isSymbolicLink?: boolean
+}
+
+export interface SFTPListDirResult {
+  path: string
+  entries: SFTPFileEntry[]
+  totalCount: number
+  directoriesCount: number
+  filesCount: number
+}
+
+export interface SCPResult {
+  direction: "upload" | "download" | "remote_to_remote"
+  sourcePath: string
+  destPath: string
+  isDirectory: boolean
+  filesCount: number
+  directoriesCount: number
+  totalBytes: number
+  sizeFormatted: string
+  durationMs: number
+  sourceSession?: string
+  targetSession?: string
+  message: string
+}
