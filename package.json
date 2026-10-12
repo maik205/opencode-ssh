@@ -1,14 +1,22 @@
 {
   "name": "opencode-plugin-ssh",
   "version": "0.2.0",
-  "description": "Persistent interactive SSH sessions, profiles, remote SFTP editing, and background job supervision for OpenCode v2",
+  "description": "Persistent interactive SSH sessions, profiles, remote SFTP/SCP transfers, and background jobs for Claude Code, OpenCode, and MCP clients",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "opencode-plugin-ssh": "./bin/mcp.js",
+    "opencode-ssh-mcp": "./bin/mcp.js"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./mcp": {
+      "import": "./dist/mcp.js",
+      "types": "./dist/mcp.d.ts"
     },
     "./tui": {
       "import": "./dist/tui.js",
@@ -17,6 +25,9 @@
   },
   "files": [
     "dist",
+    "bin",
+    ".claude-plugin",
+    ".mcp.json",
     "README.md",
     "LICENSE"
   ],
@@ -37,9 +48,16 @@
   "keywords": [
     "opencode",
     "opencode-plugin",
+    "mcp",
+    "mcp-server",
+    "claude",
+    "claude-code",
+    "claude-plugin",
+    "model-context-protocol",
     "ssh",
     "ssh2",
     "sftp",
+    "scp",
     "pty",
     "terminal",
     "remote-development",
@@ -48,6 +66,7 @@
   "author": "maik205",
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "ssh-config": "^5.3.0",
     "ssh2": "^1.17.0"
   },
@@ -63,5 +82,10 @@
   },
   "peerDependencies": {
     "@opencode/plugin": ">=2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
   }
 }

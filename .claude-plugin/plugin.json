@@ -1,0 +1,27 @@
+{
+  "name": "opencode-ssh",
+  "version": "0.2.0",
+  "description": "Persistent SSH sessions, interactive PTY shells, SFTP/SCP file transfers, and background jobs for Claude Code and OpenCode",
+  "author": {
+    "name": "maik205"
+  },
+  "homepage": "https://github.com/maik205/opencode-ssh#readme",
+  "repository": "https://github.com/maik205/opencode-ssh",
+  "license": "MIT",
+  "keywords": [
+    "ssh",
+    "sftp",
+    "scp",
+    "pty",
+    "terminal",
+    "remote",
+    "mcp",
+    "claude-code"
+  ],
+  "mcpServers": {
+    "ssh": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/mcp.js"]
+    }
+  }
+}
