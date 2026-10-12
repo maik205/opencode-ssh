@@ -45,7 +45,7 @@ Add a `.mcp.json` file in your repository root:
 }
 ```
 
-### Option 3: Claude Code Plugin
+### Option 3: Claude Code Plugin & Mod (Slash Commands + Live Spinner)
 
 Install directly into Claude Code:
 
@@ -58,6 +58,12 @@ Or load locally during development:
 ```bash
 claude --plugin-dir /path/to/opencode-ssh
 ```
+
+When loaded as a Claude Code plugin/mod, it automatically adds:
+- **`/ssh-profiles`**: Browse configured hosts and connection parameters from `~/.ssh/config`.
+- **`/ssh-status`**: View real-time active SSH tool operations and history.
+- **`/ssh-help`**: Instant cheatsheet of available SSH commands and MCP tools.
+- **Live Spinner Feedback**: Shows `· SSH: <operation>` on the Claude Code spinner whenever a remote SSH or SCP task is running.
 
 ---
 

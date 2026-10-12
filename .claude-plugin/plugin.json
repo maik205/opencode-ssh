@@ -18,6 +18,7 @@
     "mcp",
     "claude-code"
   ],
+  "hooks": "./hooks/hooks.json",
   "mcpServers": {
     "ssh": {
       "command": "node",

@@ -26,6 +26,7 @@
   "files": [
     "dist",
     "bin",
+    "hooks",
     ".claude-plugin",
     ".mcp.json",
     "README.md",
