@@ -27,7 +27,7 @@ export function createMcpServer(): McpServerInstance {
   const server = new Server(
     {
       name: "opencode-ssh",
-      version: "0.2.0",
+      version: "0.3.0",
     },
     {
       capabilities: {
@@ -152,7 +152,7 @@ Project .mcp.json setup:
   }
 
   if (args.includes("--version") || args.includes("-v")) {
-    process.stderr.write("0.2.0\n")
+    process.stderr.write("0.3.0\n")
     process.exit(0)
   }
 

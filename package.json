@@ -1,6 +1,6 @@
 {
   "name": "opencode-plugin-ssh",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Persistent interactive SSH sessions, profiles, remote SFTP/SCP transfers, and background jobs for Claude Code, OpenCode, and MCP clients",
   "type": "module",
   "main": "./dist/index.js",

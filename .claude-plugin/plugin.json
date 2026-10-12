@@ -1,6 +1,6 @@
 {
   "name": "opencode-ssh",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Persistent SSH sessions, interactive PTY shells, SFTP/SCP file transfers, and background jobs for Claude Code and OpenCode",
   "author": {
     "name": "maik205"
