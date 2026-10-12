@@ -1,0 +1,15 @@
+{
+  "name": "opencode-ssh-marketplace",
+  "owner": {
+    "name": "maik205"
+  },
+  "description": "SSH connection management, SFTP/SCP file transfers, and background jobs for Claude Code",
+  "plugins": [
+    {
+      "name": "opencode-ssh",
+      "source": "./",
+      "description": "Persistent SSH sessions, interactive PTY shells, SFTP/SCP file transfers, and background jobs for Claude Code",
+      "version": "0.3.0"
+    }
+  ]
+}

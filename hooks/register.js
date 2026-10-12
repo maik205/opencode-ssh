@@ -29,7 +29,8 @@ export function register(on) {
   // 2. Command run: /ssh-profiles
   on("command.run", { command: "ssh-profiles" }, async ($, e) => {
     try {
-      const home = $.env.get("HOME") || $.env.get("USERPROFILE") || ""
+      const homeRaw = (await $.env.get("HOME")) || (await $.env.get("USERPROFILE")) || ""
+      const home = typeof homeRaw === "string" ? homeRaw.replace(/\\/g, "/") : ""
       const configPath = home ? `${home}/.ssh/config` : ""
       let configContent = ""
 
